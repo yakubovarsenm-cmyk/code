@@ -1,0 +1,1067 @@
+/**
+ * Code.gs — Серверная часть (Google Apps Script)
+ *
+ * Исправления и функционал:
+ * - Надёжная getTableData() — обработка ошибок диапазона
+ * - Session token auth (createSessionToken / validateSessionToken / logout / invalidateAllSessionsForUser)
+ * - Эндпоинт чтения таблицы по токену: getTableDataWithToken (любой авторизованный пользователь)
+ * - Админ-эндпоинты: approve/reject/updateTableDataWithToken/getAuditLogsWithToken (проверка токена)
+ * - Audit log в листе "Audit" + пагинация БЕЗ полной выборки (пишем только разрешённые события)
+ * - СЕРВЕРНЫЙ ФИЛЬТР ЛОГОВ: пишем и возвращаем только действия update_table / approve / reject
+ * - Серверная валидация входных данных и sanitize + нейтрализация формул (=, +, -, @)
+ * - Rate-limiting через CacheService: per-email + глобальный счётчик
+ * - Кэш заголовков
+ * - Проверка уникальности email при добавлении пользователя под ScriptLock (без гонок)
+ * - В updateTableDataWithToken запрет формул и нормализация колонки "Цвет", сброс кэша заголовков
+ * - Детальные логи правок: "Как было" → "Как стало" с A1-адресами (логируются, т.к. это update_table)
+ * - Цвет роли: робастное чтение из колонки "Цвет" + резерв по фону ячейки
+ * - Защита заголовков: НЕ перезаписываем первую строку листа (Users), но разрешаем редактировать первую строку диапазона
+ * - Эмодзи обрезаются по графемам (не ломаем суррогатные пары)
+ * - Больше не отдаем пароль в getRegistrationRequests
+ * - findOrNormalizeRequestsSheet больше не переименовывает листы автоматически — только находит/создаёт
+ */
+
+const SCRIPT_PROPERTIES = PropertiesService.getScriptProperties();
+const CACHE = CacheService.getScriptCache();
+
+// Константы
+const SESSION_TTL_SECONDS = 30 * 60; // 30 минут
+const HEADERS_CACHE_TTL = 60 * 60;   // 1 час
+const AUTH_ATTEMPT_LIMIT = 10;       // максимум попыток авторизации per-email за окно
+const AUTH_ATTEMPT_TTL = 5 * 60;     // окно попыток (сек)
+const AUTH_GLOBAL_ATTEMPT_LIMIT = 50;// глобальный предел попыток за окно
+const MAX_CELL_LEN = 2000;           // ограничение длины ячейки при updateTableData
+
+// Разрешённые действия для аудита: только таблица (редактирование) и заявки (принятие/отклонение)
+function isAllowedAuditAction(action) {
+  const a = String(action || '').trim().toLowerCase();
+  return a === 'update_table' || a === 'approve' || a === 'reject';
+}
+
+/**
+ * doGet - отдаёт клиент (index.html)
+ */
+function doGet(e) {
+  return HtmlService.createHtmlOutputFromFile('index')
+    .setTitle('Система пользователей')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/* ----------------------------
+   Настройки и инициализация
+   ---------------------------- */
+
+function getSettings() {
+  let settings = SCRIPT_PROPERTIES.getProperties();
+  if (Object.keys(settings).length === 0) {
+    settings = {
+      USERS_SHEET_NAME: 'Пользователи',
+      SETTINGS_SHEET_NAME: 'Настройки',
+      REG_REQUESTS_SHEET_NAME: 'Заявки на регистрацию',
+      AUDIT_SHEET_NAME: 'Audit',
+      DATA_SHEET_NAME_PROPERTY: 'Лист',
+      DATA_RANGE_PROPERTY: 'Диапазон'
+    };
+    SCRIPT_PROPERTIES.setProperties(settings);
+  } else {
+    if (!settings.REG_REQUESTS_SHEET_NAME) settings.REG_REQUESTS_SHEET_NAME = 'Заявки на регистрацию';
+    if (!settings.AUDIT_SHEET_NAME) settings.AUDIT_SHEET_NAME = 'Audit';
+    if (!settings.SETTINGS_SHEET_NAME) settings.SETTINGS_SHEET_NAME = 'Настройки';
+  }
+  return settings;
+}
+
+function initSheetsOnce() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s = getSettings();
+
+  // Пользователи
+  let usersSheet = ss.getSheetByName(s.USERS_SHEET_NAME);
+  if (!usersSheet) {
+    usersSheet = ss.insertSheet(s.USERS_SHEET_NAME);
+    usersSheet.appendRow(['Эмодзи', 'Имя', 'Роль', 'Цвет', 'Почта', 'Пароль', 'Описание', 'Админ']);
+  } else {
+    const vals = usersSheet.getDataRange().getValues();
+    if (!vals || vals.length < 1) {
+      usersSheet.clear();
+      usersSheet.appendRow(['Эмодзи', 'Имя', 'Роль', 'Цвет', 'Почта', 'Пароль', 'Описание', 'Админ']);
+    }
+  }
+
+  // Настройки
+  let settingsSheet = ss.getSheetByName(s.SETTINGS_SHEET_NAME);
+  if (!settingsSheet) {
+    settingsSheet = ss.insertSheet(s.SETTINGS_SHEET_NAME);
+    settingsSheet.appendRow([s.DATA_SHEET_NAME_PROPERTY, s.DATA_RANGE_PROPERTY]);
+    settingsSheet.appendRow(['Данные', 'A1:C10']);
+  } else {
+    const vals = settingsSheet.getDataRange().getValues();
+    if (!vals || vals.length < 2) {
+      settingsSheet.clear();
+      settingsSheet.appendRow([s.DATA_SHEET_NAME_PROPERTY, s.DATA_RANGE_PROPERTY]);
+      settingsSheet.appendRow(['Данные', 'A1:C10']);
+    }
+  }
+
+  // Audit
+  let audit = ss.getSheetByName(s.AUDIT_SHEET_NAME);
+  if (!audit) {
+    audit = ss.insertSheet(s.AUDIT_SHEET_NAME);
+    audit.appendRow(['Timestamp', 'Actor', 'Action', 'Target', 'Details']);
+  }
+
+  // Заявки
+  let req = ss.getSheetByName(s.REG_REQUESTS_SHEET_NAME);
+  if (!req) {
+    req = ss.insertSheet(s.REG_REQUESTS_SHEET_NAME);
+    req.appendRow(['Эмодзи', 'Имя', 'Роль', 'Цвет', 'Почта', 'Пароль', 'Описание', 'Админ']);
+  }
+}
+
+function findOrNormalizeRequestsSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s = getSettings();
+  const canonical = s.REG_REQUESTS_SHEET_NAME;
+
+  // Если канонический лист есть — вернуть его
+  let exact = ss.getSheetByName(canonical);
+  if (exact) return exact;
+
+  // Иначе — найти подходящий лист по шаблону, НЕ переименовывая
+  const all = ss.getSheets();
+  const regex = /заявк|запрос|request|registration/i;
+  for (let i = 0; i < all.length; i++) {
+    const name = all[i].getName();
+    if (regex.test(name)) {
+      return all[i];
+    }
+  }
+
+  // Если не нашли — создать канонический
+  const newSheet = ss.insertSheet(canonical);
+  newSheet.appendRow(['Эмодзи', 'Имя', 'Роль', 'Цвет', 'Почта', 'Пароль', 'Описание', 'Админ']);
+  return newSheet;
+}
+
+function ensureSheetsInitialized() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s = getSettings();
+  const flag = SCRIPT_PROPERTIES.getProperty('SHEETS_INITIALIZED') === 'true';
+
+  if (flag) {
+    const need = [s.USERS_SHEET_NAME, s.SETTINGS_SHEET_NAME, s.REG_REQUESTS_SHEET_NAME, s.AUDIT_SHEET_NAME];
+    let allPresent = true;
+    for (let i = 0; i < need.length; i++) {
+      if (!ss.getSheetByName(need[i])) {
+        allPresent = false;
+        break;
+      }
+    }
+    if (allPresent) return;
+  }
+
+  initSheetsOnce();
+  findOrNormalizeRequestsSheet();
+  SCRIPT_PROPERTIES.setProperty('SHEETS_INITIALIZED', 'true');
+}
+
+/* ----------------------------
+   Утилитарные чтения / кэш заголовков
+   ---------------------------- */
+
+function getSheetHeaders(sheetName) {
+  const cacheKey = 'headers_' + sheetName;
+  const cached = CACHE.get(cacheKey);
+  if (cached) {
+    try { return JSON.parse(cached); } catch (e) {}
+  }
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return [];
+  const lastCol = Math.max(1, sheet.getLastColumn() || 1);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim());
+  CACHE.put(cacheKey, JSON.stringify(headers), HEADERS_CACHE_TTL);
+  return headers;
+}
+
+function readSheetDataRows(sheetName) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return [];
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(1, sheet.getLastColumn() || 1);
+  if (lastRow < 2) return [];
+  const numRows = lastRow - 1;
+  return sheet.getRange(2, 1, numRows, lastCol).getValues();
+}
+
+/* ----------------------------
+   Validation, sanitization & helpers
+   ---------------------------- */
+
+function isValidEmail(email) {
+  if (!email || typeof email !== 'string') return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+}
+
+function sanitizeString(s, maxLen) {
+  if (s == null) return '';
+  let str = String(s);
+  // убрать управляющие
+  str = str.replace(/[\x00-\x1F\x7F]/g, '');
+  if (maxLen && str.length > maxLen) str = str.substring(0, maxLen);
+  return str;
+}
+
+function neutralizeFormulaCell(v) {
+  // Если значение начинается с = + - @ — превратим в текст (апостроф)
+  if (v == null) return '';
+  let s = String(v);
+  if (/^[=+\-@]/.test(s)) return "'" + s;
+  return s;
+}
+
+function truncateGraphemes(s, max) {
+  const arr = Array.from(String(s || ''));
+  return arr.slice(0, max).join('');
+}
+
+function normalizeHexColor(v) {
+  const s = String(v || '').trim();
+  if (/^#([0-9a-fA-F]{6})$/.test(s)) return s;
+  if (/^[0-9a-fA-F]{6}$/.test(s)) return '#' + s;
+  if (/^#([0-9a-fA-F]{3})$/.test(s)) return '#' + s.slice(1).split('').map(ch => ch + ch).join('');
+  if (/^[0-9a-fA-F]{3}$/.test(s)) return '#' + s.split('').map(ch => ch + ch).join('');
+  return '';
+}
+
+function valueByHeader(headers, row, headerName, defVal) {
+  const idx = headers.indexOf(headerName);
+  if (idx === -1) return defVal;
+  return row[idx] == null ? defVal : row[idx];
+}
+
+function findHeaderIndex(headers, variants) {
+  const lc = headers.map(h => String(h || '').trim().toLowerCase());
+  for (let v of variants) {
+    const idx = lc.indexOf(String(v || '').trim().toLowerCase());
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
+/* ----------------------------
+   Session token management (+ logout/blacklist + bulk invalidation)
+   ---------------------------- */
+
+function createSessionToken(email) {
+  if (!email) return null;
+  const token = Utilities.getUuid();
+  const sessionKey = 'session_' + token;
+  const createdKey = 'session_created_' + token;
+  const nowTs = Date.now().toString();
+  try {
+    CACHE.put(sessionKey, String(email), SESSION_TTL_SECONDS);
+    CACHE.put(createdKey, nowTs, SESSION_TTL_SECONDS);
+  } catch (e) {
+    console.error('createSessionToken cache error: ' + e.message);
+  }
+  try { logAudit(email, 'create_session', token, 'session created'); } catch (e) {}
+  return token;
+}
+
+function validateSessionToken(token) {
+  if (!token || typeof token !== 'string') return { valid: false, email: null, isAdmin: false };
+
+  const blackKey = 'black_' + token;
+  try {
+    if (CACHE.get(blackKey)) {
+      return { valid: false, email: null, isAdmin: false };
+    }
+  } catch (e) {
+    console.error('validateSessionToken blackKey error: ' + e.message);
+  }
+
+  const sessionKey = 'session_' + token;
+  const createdKey = 'session_created_' + token;
+  const email = CACHE.get(sessionKey);
+  if (!email) {
+    return { valid: false, email: null, isAdmin: false };
+  }
+
+  let createdTs = null;
+  try { createdTs = CACHE.get(createdKey); } catch (e) { console.error('validateSessionToken createdKey error: ' + e.message); }
+
+  try {
+    const killKey = 'sessions_killed_' + String(email);
+    const killedStr = SCRIPT_PROPERTIES.getProperty(killKey);
+    if (killedStr && createdTs) {
+      const killedTs = parseInt(killedStr, 10);
+      const createdNum = parseInt(createdTs, 10);
+      if (!isNaN(killedTs) && !isNaN(createdNum) && createdNum <= killedTs) {
+        return { valid: false, email: null, isAdmin: false };
+      }
+    }
+  } catch (e) {
+    console.error('validateSessionToken bulk kill check error: ' + e.message);
+  }
+
+  const vs = validateSession(email);
+  if (!vs.valid) return { valid: false, email: null, isAdmin: false };
+
+  try {
+    CACHE.put(sessionKey, String(email), SESSION_TTL_SECONDS);
+    if (createdTs) CACHE.put(createdKey, String(createdTs), SESSION_TTL_SECONDS);
+  } catch (e) {
+    console.error('validateSessionToken extend TTL error: ' + e.message);
+  }
+
+  return { valid: true, email: email, isAdmin: vs.isAdmin };
+}
+
+function logout(token) {
+  if (!token || typeof token !== 'string') return { success: false, error: 'Неверный токен' };
+
+  const sessionKey = 'session_' + token;
+  const createdKey = 'session_created_' + token;
+  const blackKey = 'black_' + token;
+
+  let email = null;
+  try { email = CACHE.get(sessionKey) || null; } catch (e) { console.error('logout read session error: ' + e.message); }
+
+  try { CACHE.remove(sessionKey); } catch (e) { console.error('logout remove session error: ' + e.message); }
+  try { CACHE.remove(createdKey); } catch (e) { console.error('logout remove created error: ' + e.message); }
+  try { CACHE.put(blackKey, '1', SESSION_TTL_SECONDS); } catch (e) { console.error('logout put black error: ' + e.message); }
+
+  try { logAudit(email || 'unknown', 'logout', token, 'token invalidated'); } catch (e) {}
+  return { success: true };
+}
+
+function invalidateAllSessionsForUser(email) {
+  if (!email || !isValidEmail(email)) return { success: false, error: 'Неверный email' };
+  const key = 'sessions_killed_' + String(email);
+  const now = Date.now().toString();
+  try {
+    SCRIPT_PROPERTIES.setProperty(key, now);
+    logAudit(email, 'invalidate_all_sessions', '', 'all sessions invalidated at ' + now);
+    return { success: true };
+  } catch (e) {
+    console.error('invalidateAllSessionsForUser error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/* ----------------------------
+   Audit log (best-effort) — пишем только разрешённые действия
+   ---------------------------- */
+
+function logAudit(actor, action, target, details) {
+  // Фильтрация: в лог уходит только update_table / approve / reject
+  if (!isAllowedAuditAction(action)) return;
+
+  try {
+    const s = getSettings();
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName(s.AUDIT_SHEET_NAME);
+    if (!sheet) {
+      sheet = ss.insertSheet(s.AUDIT_SHEET_NAME);
+      sheet.appendRow(['Timestamp', 'Actor', 'Action', 'Target', 'Details']);
+    }
+    const lock = LockService.getScriptLock();
+    lock.waitLock(5000);
+    try {
+      const ts = new Date();
+      sheet.appendRow([ts.toISOString(), actor || '', action || '', target || '', details || '']);
+    } finally {
+      try { lock.releaseLock(); } catch (e) {}
+    }
+  } catch (e) {
+    console.error('logAudit error: ' + e.message);
+  }
+}
+
+/* ----------------------------
+   Rate limiting helpers (cache-based)
+   ---------------------------- */
+
+function isAuthBlocked(email) {
+  const key = 'auth_attempts_' + String(email);
+  const attempts = parseInt(CACHE.get(key) || '0', 10) || 0;
+  return attempts >= AUTH_ATTEMPT_LIMIT;
+}
+function recordAuthFailure(email) {
+  const key = 'auth_attempts_' + String(email);
+  const attempts = parseInt(CACHE.get(key) || '0', 10) || 0;
+  CACHE.put(key, (attempts + 1).toString(), AUTH_ATTEMPT_TTL);
+}
+function clearAuthFailures(email) {
+  const key = 'auth_attempts_' + String(email);
+  try { CACHE.remove(key); } catch (e) {}
+}
+
+// Глобальный лимит (дополнительно к персонифицированному)
+function isAuthGlobalBlocked() {
+  const key = 'auth_attempts_global';
+  const attempts = parseInt(CACHE.get(key) || '0', 10) || 0;
+  return attempts >= AUTH_GLOBAL_ATTEMPT_LIMIT;
+}
+function recordAuthGlobalFailure() {
+  const key = 'auth_attempts_global';
+  const attempts = parseInt(CACHE.get(key) || '0', 10) || 0;
+  CACHE.put(key, (attempts + 1).toString(), AUTH_ATTEMPT_TTL);
+}
+
+/* ----------------------------
+   Authentication endpoint
+   ---------------------------- */
+
+function checkAuth(pochta, password) {
+  ensureSheetsInitialized();
+
+  if (!pochta || !password) return { authorized: false, error: 'Требуются почта и пароль' };
+  if (!isValidEmail(pochta)) return { authorized: false, error: 'Неверный формат почты' };
+
+  // Rate limits
+  if (isAuthGlobalBlocked()) {
+    logAudit(pochta, 'auth_blocked', '', 'Too many attempts (global)');
+    return { authorized: false, error: 'Слишком много попыток. Попробуйте позже.' };
+  }
+  if (isAuthBlocked(pochta)) {
+    logAudit(pochta, 'auth_blocked', '', 'Too many attempts (email)');
+    return { authorized: false, error: 'Слишком много попыток. Попробуйте позже.' };
+  }
+
+  const s = getSettings();
+  const headers = getSheetHeaders(s.USERS_SHEET_NAME);
+
+  const mailIdx = headers.indexOf('Почта');
+  const passIdx = headers.indexOf('Пароль');
+  const nameIdx = headers.indexOf('Имя');
+  const roleIdx = headers.indexOf('Роль');
+  const adminIdx = headers.indexOf('Админ');
+
+  if (mailIdx === -1 || passIdx === -1) {
+    logAudit('system', 'login_failed', '', 'Users sheet missing required columns');
+    return { authorized: false, error: 'Лист "Пользователи" повреждён (нет колонок Почта/Пароль)' };
+  }
+
+  const rows = readSheetDataRows(s.USERS_SHEET_NAME);
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+
+    const mail = String(row[mailIdx] || '').trim();
+    if (mail === String(pochta).trim()) {
+      const stored = String(row[passIdx] || '');
+      if (stored === String(password)) {
+        clearAuthFailures(pochta);
+        const isAdm = adminIdx !== -1 ? cellToBool(row[adminIdx]) : false;
+        const token = createSessionToken(pochta);
+        const userName = nameIdx !== -1 ? row[nameIdx] : '';
+        const userRole = roleIdx !== -1 ? row[roleIdx] : '';
+        logAudit(pochta, 'login_success', '', 'login OK');
+        return { authorized: true, userName: userName, userRole: userRole, isAdmin: isAdm, token: token };
+      } else {
+        recordAuthFailure(pochta);
+        recordAuthGlobalFailure();
+        logAudit(pochta, 'login_failed', '', 'invalid password');
+        return { authorized: false, error: 'Неверная почта или пароль' };
+      }
+    }
+  }
+
+  recordAuthFailure(pochta);
+  recordAuthGlobalFailure();
+  logAudit(pochta, 'login_failed', '', 'email not found');
+  return { authorized: false, error: 'Неверная почта или пароль' };
+}
+
+/* ----------------------------
+   Session validation (users)
+   ---------------------------- */
+
+function validateSession(pochta) {
+  ensureSheetsInitialized();
+  if (!pochta) return { valid: false, isAdmin: false };
+  const s = getSettings();
+  const headers = getSheetHeaders(s.USERS_SHEET_NAME);
+  const mailIdx = headers.indexOf('Почта');
+  const adminIdx = headers.indexOf('Админ');
+
+  if (mailIdx === -1) return { valid: false, isAdmin: false };
+
+  const rows = readSheetDataRows(s.USERS_SHEET_NAME);
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (String(row[mailIdx] || '').trim() === String(pochta).trim()) {
+      return { valid: true, isAdmin: adminIdx !== -1 ? cellToBool(row[adminIdx]) : false };
+    }
+  }
+  return { valid: false, isAdmin: false };
+}
+
+/* ----------------------------
+   Public users with pagination (цвет читается из ячейки или фона)
+   ---------------------------- */
+
+function getPublicUserDataPage(page, pageSize) {
+  ensureSheetsInitialized();
+  page = Math.max(1, parseInt(page, 10) || 1);
+  pageSize = Math.max(1, Math.min(200, parseInt(pageSize, 10) || 50));
+
+  const s = getSettings();
+  const headers = getSheetHeaders(s.USERS_SHEET_NAME);
+
+  // Робастные индексы по нескольким названиям
+  const emojiIdx = findHeaderIndex(headers, ['Эмодзи', 'emoji', 'emojis']);
+  const nameIdx  = findHeaderIndex(headers, ['Имя', 'name']);
+  const roleIdx  = findHeaderIndex(headers, ['Роль', 'role']);
+  const colorIdx = findHeaderIndex(headers, ['Цвет', 'color', 'colour', 'цвет']);
+  const mailIdx  = findHeaderIndex(headers, ['Почта', 'email', 'e-mail', 'mail']);
+  const descIdx  = findHeaderIndex(headers, ['Описание', 'description', 'desc']);
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(s.USERS_SHEET_NAME);
+  if (!sheet) return { users: [], total: 0, page: page, pageSize: pageSize };
+
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(1, sheet.getLastColumn() || (headers.length || 1));
+  const total = Math.max(0, lastRow - 1);
+  if (total === 0) return { users: [], total: 0, page: page, pageSize: pageSize };
+
+  const startIndex = (page - 1) * pageSize; // 0-based
+  const startRow = 2 + startIndex;
+  const readRows = Math.min(pageSize, lastRow - startRow + 1);
+
+  let rows = [];
+  let colorBackgrounds = null;
+  if (readRows > 0) {
+    rows = sheet.getRange(startRow, 1, readRows, lastCol).getValues();
+    if (colorIdx !== -1) {
+      const colorCol1 = colorIdx + 1;
+      colorBackgrounds = sheet.getRange(startRow, colorCol1, readRows, 1).getBackgrounds(); // [[#rrggbb], ...]
+    }
+  }
+
+  const users = rows.map((r, i) => {
+    const emoji = emojiIdx !== -1 ? r[emojiIdx] : '👤';
+    const name  = nameIdx  !== -1 ? r[nameIdx]  : 'Пользователь';
+    const role  = roleIdx  !== -1 ? r[roleIdx]  : 'Роль';
+
+    // 1) значение из ячейки; 2) фон ячейки; 3) дефолт
+    let color = colorIdx !== -1 ? normalizeHexColor(r[colorIdx]) : '';
+    if (!color && colorBackgrounds && colorBackgrounds[i] && colorBackgrounds[i][0]) {
+      const bgHex = normalizeHexColor(colorBackgrounds[i][0]);
+      if (bgHex && bgHex.toLowerCase() !== '#ffffff') {
+        color = bgHex;
+      }
+    }
+    if (!color) color = '#5865F2';
+
+    const email = mailIdx !== -1 ? r[mailIdx] : '';
+    const desc  = descIdx !== -1 ? r[descIdx] : '';
+    return [emoji || '👤', name || 'Пользователь', role || 'Роль', color, email || '', desc || ''];
+  });
+
+  return { users: users, total: total, page: page, pageSize: pageSize };
+}
+
+/* ----------------------------
+   Robust getTableData (fix spinner issue) + tokenized reader
+   ---------------------------- */
+
+function getTableData() {
+  ensureSheetsInitialized();
+  const s = getSettings();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const settingsSheet = ss.getSheetByName(s.SETTINGS_SHEET_NAME);
+  if (!settingsSheet) {
+    return { error: 'Лист "Настройки" не найден' };
+  }
+
+  // read second row columns A and B (sheet name and range)
+  try {
+    const vals = settingsSheet.getRange(2, 1, 1, 2).getValues();
+    if (!vals || !vals[0]) {
+      return { error: 'Настройки не заданы. Укажите лист и диапазон в листе "Настройки"' };
+    }
+    const sheetName = String(vals[0][0] || '').trim();
+    const range = String(vals[0][1] || '').trim();
+    if (!sheetName) return { error: 'Имя листа в настройках пусто' };
+    if (!range) return { error: 'Диапазон в настройках пуст' };
+
+    const dataSheet = ss.getSheetByName(sheetName);
+    if (!dataSheet) return { error: `Лист "${sheetName}" не найден` };
+
+    let data;
+    try {
+      const rng = dataSheet.getRange(range);
+      const numRows = rng.getNumRows();
+      const numCols = rng.getNumColumns();
+      if (numRows <= 0 || numCols <= 0) return { error: 'Указанный диапазон пуст' };
+      data = rng.getValues();
+    } catch (e) {
+      return { error: `Ошибка диапазона "${range}": ${e.message}` };
+    }
+    return { data: data, settings: { sheetName: sheetName, range: range } };
+  } catch (e) {
+    return { error: 'Ошибка при чтении настроек: ' + e.message };
+  }
+}
+
+// Новый эндпоинт: только для авторизованных (не требуется быть админом)
+function getTableDataWithToken(token) {
+  ensureSheetsInitialized();
+  const vt = validateSessionToken(token);
+  if (!vt.valid) return { error: 'Не авторизовано' };
+  return getTableData();
+}
+
+/* ----------------------------
+   Registration requests & admin actions
+   ---------------------------- */
+
+function getRegistrationRequests() {
+  ensureSheetsInitialized();
+  const s = getSettings();
+  const sheet = findOrNormalizeRequestsSheet();
+  if (!sheet) return [];
+  const headers = getSheetHeaders(sheet.getName()); // используем реальное имя(если лист найден по шаблону)
+  const emojiIdx = headers.indexOf('Эмодзи');
+  const nameIdx = headers.indexOf('Имя');
+  const roleIdx = headers.indexOf('Роль');
+  const colorIdx = headers.indexOf('Цвет');
+  const mailIdx = headers.indexOf('Почта');
+  // const passIdx = headers.indexOf('Пароль'); // не возвращаем на клиент
+  const descIdx = headers.indexOf('Описание');
+  const adminIdx = headers.indexOf('Админ');
+
+  const rows = (function() {
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return [];
+    const lastCol = Math.max(1, sheet.getLastColumn() || 1);
+    return sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  })();
+
+  const requests = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    requests.push({
+      _row: i + 2,
+      emoji: emojiIdx !== -1 ? row[emojiIdx] : '👤',
+      name: nameIdx !== -1 ? row[nameIdx] : '',
+      role: roleIdx !== -1 ? row[roleIdx] : '',
+      color: colorIdx !== -1 ? row[colorIdx] : '#5865F2',
+      email: mailIdx !== -1 ? row[mailIdx] : '',
+      // password: НЕ возвращаем
+      description: descIdx !== -1 ? row[descIdx] : '',
+      isAdmin: adminIdx !== -1 ? cellToBool(row[adminIdx]) : false
+    });
+  }
+  return requests;
+}
+
+function approveRegistrationRequest(token, requestRow) {
+  ensureSheetsInitialized();
+  const vt = validateSessionToken(token);
+  if (!vt.valid || !vt.isAdmin) {
+    logAudit(vt.email || 'unknown', 'approve_failed', requestRow, 'not authorized');
+    return { success: false, error: 'Не авторизовано' };
+  }
+
+  requestRow = parseInt(requestRow, 10);
+  if (!requestRow || requestRow < 2) return { success: false, error: 'Неверный номер строки' };
+
+  const s = getSettings();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const reqSheet = findOrNormalizeRequestsSheet();
+  if (!reqSheet) return { success: false, error: 'Лист заявок не найден' };
+
+  const headers = getSheetHeaders(reqSheet.getName());
+  const numCols = Math.max(1, headers.length || reqSheet.getLastColumn() || 1);
+  try {
+    const rowData = reqSheet.getRange(requestRow, 1, 1, numCols).getValues()[0];
+
+    const userData = {
+      emoji: sanitizeString(valueByHeader(headers, rowData, 'Эмодзи', '👤'), 16),
+      name: sanitizeString(valueByHeader(headers, rowData, 'Имя', ''), 100),
+      role: sanitizeString(valueByHeader(headers, rowData, 'Роль', ''), 50),
+      color: normalizeHexColor(valueByHeader(headers, rowData, 'Цвет', '#5865F2')) || '#5865F2',
+      email: sanitizeString(valueByHeader(headers, rowData, 'Почта', ''), 200),
+      password: sanitizeString(valueByHeader(headers, rowData, 'Пароль', ''), 200),
+      description: sanitizeString(valueByHeader(headers, rowData, 'Описание', ''), 1000),
+      isAdmin: cellToBool(valueByHeader(headers, rowData, 'Админ', false))
+    };
+
+    if (!isValidEmail(userData.email)) {
+      return { success: false, error: 'Неверный email в заявке' };
+    }
+
+    // Нейтрализуем потенциальные формулы в текстовых полях перед добавлением
+    userData.emoji = truncateGraphemes(neutralizeFormulaCell(userData.emoji), 8);
+    userData.name = neutralizeFormulaCell(userData.name);
+    userData.role = neutralizeFormulaCell(userData.role);
+    userData.description = neutralizeFormulaCell(userData.description);
+    userData.password = neutralizeFormulaCell(userData.password);
+
+    const addResult = addNewUser(userData);
+    if (!addResult.success) {
+      logAudit(vt.email, 'approve_failed', userData.email, String(addResult.error));
+      return { success: false, error: 'Не удалось добавить пользователя: ' + addResult.error };
+    }
+
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      reqSheet.deleteRow(requestRow);
+    } finally {
+      try { lock.releaseLock(); } catch (e) {}
+    }
+
+    logAudit(vt.email, 'approve', userData.email, 'approved request row ' + requestRow);
+    return { success: true, message: 'Заявка одобрена, пользователь добавлен' };
+  } catch (e) {
+    logAudit(vt.email, 'approve_error', requestRow, e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+function rejectRegistrationRequest(token, requestRow) {
+  ensureSheetsInitialized();
+  const vt = validateSessionToken(token);
+  if (!vt.valid || !vt.isAdmin) {
+    logAudit(vt.email || 'unknown', 'reject_failed', requestRow, 'not authorized');
+    return { success: false, error: 'Не авторизовано' };
+  }
+
+  requestRow = parseInt(requestRow, 10);
+  if (!requestRow || requestRow < 2) return { success: false, error: 'Неверный номер строки' };
+
+  const s = getSettings();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const reqSheet = findOrNormalizeRequestsSheet();
+  if (!reqSheet) return { success: false, error: 'Лист заявок не найден' };
+
+  try {
+    const headers = getSheetHeaders(reqSheet.getName());
+    const numCols = Math.max(1, headers.length || reqSheet.getLastColumn() || 1);
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      const rowData = reqSheet.getRange(requestRow, 1, 1, numCols).getValues()[0];
+      const targetEmail = String(valueByHeader(headers, rowData, 'Почта', '') || '');
+      reqSheet.deleteRow(requestRow);
+      logAudit(vt.email, 'reject', targetEmail || ('row:' + requestRow), 'rejected and deleted');
+    } finally {
+      try { lock.releaseLock(); } catch (e) {}
+    }
+    return { success: true, message: 'Заявка отклонена и удалена' };
+  } catch (e) {
+    logAudit(vt.email, 'reject_error', requestRow, e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/* ----------------------------
+   Update table data (admin-protected) + детальные логи отличий
+   Разрешаем редактировать первую строку диапазона; по-прежнему защищаем строку 1 листа Users.
+   ---------------------------- */
+
+function updateTableDataWithToken(token, sheetName, range, newData) {
+  ensureSheetsInitialized();
+  const vt = validateSessionToken(token);
+  if (!vt.valid || !vt.isAdmin) return { success: false, error: 'Не авторизовано' };
+
+  if (!sheetName || !range || !Array.isArray(newData) || newData.length === 0) {
+    return { success: false, error: 'Неверные данные' };
+  }
+  for (let i = 0; i < newData.length; i++) {
+    if (!Array.isArray(newData[i])) return { success: false, error: 'Неверный формат newData' };
+  }
+
+  try {
+    const s = getSettings();
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return { success: false, error: `Лист "${sheetName}" не найден` };
+
+    const dataRange = sheet.getRange(range);
+    const rngRows = dataRange.getNumRows();
+    const rngCols = dataRange.getNumColumns();
+
+    if (newData.length !== rngRows) {
+      return { success: false, error: `Несоответствие рядам. Ожидалось ${rngRows}, получено ${newData.length}` };
+    }
+    if (!newData.every(r => Array.isArray(r) && r.length === rngCols)) {
+      return { success: false, error: `Несоответствие колонкам. Ожидалось по ${rngCols} значений в строках` };
+    }
+
+    const headers = getSheetHeaders(sheetName);
+    const colorHeaderIdx0 = findHeaderIndex(headers, ['Цвет','color','colour','цвет']);
+    const colorColAbs1 = colorHeaderIdx0 >= 0 ? (colorHeaderIdx0 + 1) : -1;
+
+    const rangeStartRow1 = dataRange.getRow();
+    const rangeStartCol1 = dataRange.getColumn();
+    const sheetIsUsers = sheetName === s.USERS_SHEET_NAME;
+
+    // ВАЖНО: разрешаем редактировать первую строку диапазона (UI без заголовка)
+    const protectFirstRowOfRange = false;
+
+    // Определяем, попадает ли "Цвет" внутрь диапазона и его относительный индекс
+    const colorInRange = colorColAbs1 >= rangeStartCol1 && colorColAbs1 <= (rangeStartCol1 + rngCols - 1);
+    const colorRelIdx = colorInRange ? (colorColAbs1 - rangeStartCol1) : -1;
+
+    const oldValues = dataRange.getValues();
+
+    // Подготовка к дифф-логированию
+    const diffs = [];
+    const maxDiffs = 100;
+    const trunc = (v) => {
+      const sVal = String(v == null ? '' : v);
+      return sVal.length > 200 ? sVal.slice(0, 200) + '…' : sVal;
+    };
+
+    // Нормализация/санитайз входных данных, защита первой строки ЛИСТА Users
+    for (let i = 0; i < newData.length; i++) {
+      const isHeaderOfRange = (protectFirstRowOfRange && i === 0);
+      const isFirstRowOfUsers = (sheetIsUsers && (rangeStartRow1 + i) === 1);
+
+      if (isHeaderOfRange || isFirstRowOfUsers) {
+        newData[i] = oldValues[i];
+        continue;
+      }
+
+      const row = newData[i];
+      for (let j = 0; j < row.length; j++) {
+        // Запрет формул: экранируем = + - @
+        if (typeof row[j] === 'string') {
+          let cell = neutralizeFormulaCell(row[j].trim());
+          row[j] = sanitizeString(cell, MAX_CELL_LEN);
+        } else {
+          row[j] = sanitizeString(row[j], MAX_CELL_LEN);
+        }
+      }
+      // Нормализация цвета
+      if (colorRelIdx >= 0) {
+        const norm = normalizeHexColor(row[colorRelIdx]);
+        row[colorRelIdx] = norm || '#5865F2';
+      }
+    }
+
+    // Сбор диффов (по финальным значениям)
+    for (let i = 0; i < newData.length && diffs.length < maxDiffs; i++) {
+      const isHeaderOfRange = (protectFirstRowOfRange && i === 0);
+      const isFirstRowOfUsers = (sheetIsUsers && (rangeStartRow1 + i) === 1);
+      if (isHeaderOfRange || isFirstRowOfUsers) continue;
+
+      for (let j = 0; j < newData[i].length && diffs.length < maxDiffs; j++) {
+        const before = oldValues[i][j];
+        const after = newData[i][j];
+        if (before !== after) {
+          const a1 = sheet.getRange(rangeStartRow1 + i, rangeStartCol1 + j, 1, 1).getA1Notation();
+          diffs.push(`${a1}: "${trunc(before)}" -> "${trunc(after)}"`);
+        }
+      }
+    }
+
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      dataRange.setValues(newData);
+    } finally {
+      lock.releaseLock();
+    }
+
+    // Сброс кэша заголовков затронутого листа
+    CACHE.remove('headers_' + sheetName);
+
+    const details = diffs.length ? `changed ${diffs.length} cells:\n` + diffs.join('\n') : 'no-op';
+    logAudit(vt.email, 'update_table', `${sheetName}:${range}`, details);
+    return { success: true, message: 'Данные таблицы обновлены' };
+  } catch (e) {
+    logAudit(vt.email, 'update_table_error', `${sheetName}:${range}`, e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/* ----------------------------
+   Users operations
+   ---------------------------- */
+
+function safeAppendRow(sheet, rowArr) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    sheet.appendRow(rowArr);
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+function addNewUser(userData) {
+  ensureSheetsInitialized();
+
+  if (!userData || !userData.email) return { success: false, error: 'Неверные данные пользователя' };
+  if (!isValidEmail(userData.email)) return { success: false, error: 'Неверный email' };
+
+  const s = getSettings();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(s.USERS_SHEET_NAME);
+  if (!sheet) return { success: false, error: 'Лист "Пользователи" не найден' };
+
+  // Подготовка значений + нейтрализация формул
+  const emojiSafe = truncateGraphemes(neutralizeFormulaCell(userData.emoji || '👤'), 8);
+  const nameSafe = neutralizeFormulaCell(userData.name || '');
+  const roleSafe = neutralizeFormulaCell(userData.role || '');
+  const colorSafe = normalizeHexColor(userData.color || '#5865F2') || '#5865F2';
+  const emailSafe = neutralizeFormulaCell(userData.email || '');
+  const passSafe  = neutralizeFormulaCell(userData.password || '');
+  const descSafe  = neutralizeFormulaCell(userData.description || '');
+  const isAdmin   = userData.isAdmin ? true : false;
+
+  // Проверка уникальности email под общим ScriptLock (исключаем гонки)
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const headers = getSheetHeaders(s.USERS_SHEET_NAME);
+    const mailIdx = headers.indexOf('Почта');
+    if (mailIdx === -1) {
+      return { success: false, error: 'Лист "Пользователи" повреждён (нет колонки "Почта")' };
+    }
+    const exists = readSheetDataRows(s.USERS_SHEET_NAME).some(r =>
+      String(r[mailIdx] || '').trim().toLowerCase() === String(emailSafe || '').trim().toLowerCase()
+    );
+    if (exists) return { success: false, error: 'Пользователь с такой почтой уже существует' };
+
+    const row = [
+      sanitizeString(emojiSafe, 8),
+      sanitizeString(nameSafe, 100),
+      sanitizeString(roleSafe, 50),
+      sanitizeString(colorSafe, 20),
+      sanitizeString(emailSafe, 200),
+      sanitizeString(passSafe, 200),
+      sanitizeString(descSafe, 1000),
+      isAdmin
+    ];
+
+    sheet.appendRow(row);
+    logAudit(emailSafe, 'add_user', emailSafe, 'user added'); // не попадёт в аудит (фильтр на запись), но оставляем вызов на будущее
+    return { success: true, message: 'Пользователь добавлен' };
+  } catch (e) {
+    return { success: false, error: e.message };
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+/* ----------------------------
+   User retrieval
+   ---------------------------- */
+
+function getUserByEmail(pochta) {
+  ensureSheetsInitialized();
+  if (!pochta) return null;
+
+  const s = getSettings();
+  const headers = getSheetHeaders(s.USERS_SHEET_NAME);
+  const mailIdx = headers.indexOf('Почта');
+  const emojiIdx = headers.indexOf('Эмодзи');
+  const nameIdx = headers.indexOf('Имя');
+  const roleIdx = headers.indexOf('Роль');
+  const colorIdx = headers.indexOf('Цвет');
+  const descIdx = headers.indexOf('Описание');
+  const adminIdx = headers.indexOf('Админ');
+
+  if (mailIdx === -1) return null;
+
+  const rows = readSheetDataRows(s.USERS_SHEET_NAME);
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (String(row[mailIdx] || '').trim() === String(pochta).trim()) {
+      return {
+        emoji: emojiIdx !== -1 ? (row[emojiIdx] || '👤') : '👤',
+        name: nameIdx !== -1 ? (row[nameIdx] || '') : '',
+        role: roleIdx !== -1 ? (row[roleIdx] || '') : '',
+        color: (function(v) { return normalizeHexColor(v) || '#5865F2'; })(colorIdx !== -1 ? row[colorIdx] : ''),
+        email: row[mailIdx] || '',
+        description: descIdx !== -1 ? (row[descIdx] || '') : '',
+        isAdmin: adminIdx !== -1 ? cellToBool(row[adminIdx]) : false
+      };
+    }
+  }
+  return null;
+}
+
+/* ----------------------------
+   Audit logs endpoint (admin-protected)
+   ---------------------------- */
+
+/**
+ * getAuditLogsWithToken(token, page, pageSize)
+ * Возвращает объект: { logs: [ {Timestamp, Actor, Action, Target, Details} ], total, page, pageSize }
+ * Возвращаем ТОЛЬКО события, которые пишутся (update_table / approve / reject).
+ * Пагинация БЕЗ чтения всего листа (по окну).
+ * Упрощение отображения Details: возвращаем в поле Details только название действия (Action).
+ */
+function getAuditLogsWithToken(token, page, pageSize) {
+  ensureSheetsInitialized();
+  const vt = validateSessionToken(token);
+  if (!vt.valid || !vt.isAdmin) return { error: 'Не авторизовано' };
+
+  page = Math.max(1, parseInt(page, 10) || 1);
+  pageSize = Math.max(1, Math.min(500, parseInt(pageSize, 10) || 100));
+
+  const s = getSettings();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(s.AUDIT_SHEET_NAME);
+  if (!sheet) return { logs: [], total: 0, page: page, pageSize: pageSize };
+
+  const lastRow = sheet.getLastRow(); // с заголовком
+  const total = Math.max(0, lastRow - 1);
+  if (total === 0) return { logs: [], total: 0, page: page, pageSize: pageSize };
+
+  const lastCol = Math.max(5, sheet.getLastColumn() || 5);
+
+  // Старые записи первыми (как и ранее):
+  const startIdx = (page - 1) * pageSize;          // 0-based
+  const readRows = Math.min(pageSize, total - startIdx);
+  if (readRows <= 0) return { logs: [], total, page, pageSize };
+
+  const startRow = 2 + startIdx; // пропускаем заголовок
+  const rows = sheet.getRange(startRow, 1, readRows, lastCol).getValues();
+
+  // ВАЖНО: Details упрощаем до названия действия (Action)
+  const logs = rows.map(r => ({
+    Timestamp: r[0] || '',
+    Actor:     r[1] || '',
+    Action:    r[2] || '',
+    Target:    r[3] || '',
+    Details:   (r[2] || '') // вместо r[4]
+  }));
+
+  return { logs, total, page, pageSize };
+}
+
+/* ----------------------------
+   Helper: normalize value to boolean
+   ---------------------------- */
+
+function cellToBool(v) {
+  if (v === true) return true;
+  if (v === false) return false;
+  if (typeof v === 'number') return v === 1;
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase();
+    return s === 'true' || s === '1' || s === 'да' || s === 'yes';
+  }
+  return false;
+}
+
+/* ----------------------------
+   Session info endpoint for client bootstrapping
+   ---------------------------- */
+
+function getSessionInfo(token) {
+  const vt = validateSessionToken(token);
+  if (!vt.valid) return { valid: false };
+  return { valid: true, email: vt.email, isAdmin: vt.isAdmin };
+}
