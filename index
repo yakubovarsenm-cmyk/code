@@ -436,6 +436,55 @@
     document.getElementById('tab-tables').style.display = 'none';
     document.getElementById('tab-logs').style.display = 'none';
     document.getElementById('tab-profile').style.display = 'none';
+
+    // Полный сброс состояния и UI, чтобы избежать устаревших данных после выхода
+    try {
+      loaded = { users: false, tables: false, requests: false, logs: false, profile: false };
+      allUsers = [];
+      allRoles = [];
+      usersPage = 1;
+      usersTotal = 0;
+      allUsersLoaded = false;
+      bulkLoading = false;
+      pendingFilter = null;
+      cachedTable = null;
+      tableSettings = null;
+      logsPage = 1;
+      logsTotal = 0;
+
+      const usersGrid = document.getElementById('users-grid');
+      if (usersGrid) usersGrid.innerHTML = '<div class="card loading"><div class="spinner"></div><div>Загрузка пользователей...</div></div>';
+
+      const roleFilter = document.getElementById('role-filter');
+      if (roleFilter) roleFilter.innerHTML = '<option value="">Все роли</option>';
+
+      const tableWrap = document.getElementById('table-wrap');
+      if (tableWrap) tableWrap.innerHTML = '<div class="card">Требуется вход</div>';
+
+      const saveBtn = document.getElementById('save-table');
+      if (saveBtn) saveBtn.style.display = 'none';
+
+      const reqList = document.getElementById('requests-list');
+      if (reqList) reqList.innerHTML = '';
+      const reqLoading = document.getElementById('requests-loading');
+      if (reqLoading) reqLoading.style.display = 'none';
+
+      const logsBody = document.getElementById('logs-body');
+      if (logsBody) logsBody.innerHTML = '<div class="loading"><div class="spinner"></div><div>Загрузка логов...</div></div>';
+      const logsInfo = document.getElementById('logs-pager-info');
+      if (logsInfo) logsInfo.textContent = '';
+      const logsSearch = document.getElementById('logs-search');
+      if (logsSearch) logsSearch.value = '';
+
+      const profileCard = document.getElementById('profile-card');
+      if (profileCard) profileCard.innerHTML = '<div class="card loading"><div class="spinner"></div><div>Загрузка профиля...</div></div>';
+
+      const searchInput = document.getElementById('search');
+      if (searchInput) searchInput.value = '';
+      const loadMore = document.getElementById('load-more');
+      if (loadMore) loadMore.style.display = 'none';
+    } catch (e) {}
+
     showToast('Вы вышли', 1500);
     showSection('users');
   }
@@ -494,10 +543,19 @@
       .withSuccessHandler(res=>{
         if (!res) { grid.innerHTML = '<div class="card">Ошибка загрузки</div>'; return; }
         usersTotal = res.total || usersTotal;
+        const incoming = res.users || [];
         if (page === 1) {
-          allUsers = res.users || [];
+          if (bulkLoading && allUsers.length > 0) {
+            const byEmail = new Map();
+            const add = (u) => { const k = (u && u[4]) ? String(u[4]).toLowerCase() : ''; if (!byEmail.has(k)) byEmail.set(k, u); };
+            incoming.forEach(add);
+            allUsers.forEach(add);
+            allUsers = Array.from(byEmail.values());
+          } else {
+            allUsers = incoming;
+          }
         } else {
-          allUsers = allUsers.concat(res.users || []);
+          allUsers = allUsers.concat(incoming);
         }
         allUsersLoaded = (res.page * res.pageSize) >= usersTotal;
         populateRoles(allUsers);
@@ -743,10 +801,20 @@
     const list = document.getElementById('requests-list');
     const loading = document.getElementById('requests-loading');
     list.innerHTML = ''; loading.style.display = 'block';
+    const token = sessionStorage.getItem('sessionToken') || '';
     google.script.run
-      .withSuccessHandler(reqs=>{ loading.style.display = 'none'; renderRequests(reqs || []); loaded.requests = true; })
+      .withSuccessHandler(res=>{ 
+        loading.style.display = 'none'; 
+        if (res && res.error) { 
+          list.innerHTML = '<div class="card">' + (res.error || 'Ошибка загрузки заявок') + '</div>'; 
+          return; 
+        }
+        const reqs = Array.isArray(res) ? res : (res && Array.isArray(res.requests) ? res.requests : []);
+        renderRequests(reqs || []); 
+        loaded.requests = true; 
+      })
       .withFailureHandler(()=> { loading.style.display = 'none'; list.innerHTML = '<div class="card">Ошибка загрузки заявок</div>'; })
-      .getRegistrationRequests();
+      .getRegistrationRequests(token);
   }
 
   function renderRequests(reqs){

@@ -620,8 +620,13 @@ function getTableDataWithToken(token) {
    Registration requests & admin actions
    ---------------------------- */
 
-function getRegistrationRequests() {
+function getRegistrationRequests(token) {
   ensureSheetsInitialized();
+  // Требуется авторизация администратора
+  const vt = validateSessionToken(token);
+  if (!vt.valid || !vt.isAdmin) {
+    return { error: 'Не авторизовано' };
+  }
   const s = getSettings();
   const sheet = findOrNormalizeRequestsSheet();
   if (!sheet) return [];
