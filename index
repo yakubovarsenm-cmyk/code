@@ -1,0 +1,911 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Система пользователей</title>
+<style>
+  :root{
+    --bg:#0a0b0d;
+    --card:#101217;
+    --muted:#99a3ad;
+    --text:#e9f0f6;
+    --accent:#6b7cff;
+    --accent-2:#8a9bff;
+    --success:#22c55e;
+    --danger:#ef4444;
+    --border: rgba(255,255,255,0.06);
+    --shadow: 0 6px 18px rgba(0,0,0,0.35);
+    --shadow-sm: 0 4px 12px rgba(0,0,0,0.25);
+    --ring: 0 0 0 3px rgba(107,124,255,0.25);
+  }
+  *{box-sizing:border-box;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;padding:0}
+  body{background:radial-gradient(1200px 600px at 10% -10%, rgba(107,124,255,0.10), transparent), var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
+  header{position:sticky;top:0;backdrop-filter:saturate(140%) blur(8px);background:rgba(10,11,13,0.6);display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);z-index:50}
+  .tabs{display:flex;gap:10px;align-items:center}
+  .tab-icon{width:42px;height:42px;border-radius:10px;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.00));border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);transition:all .15s ease;box-shadow:var(--shadow-sm)}
+  .tab-icon:hover{transform:translateY(-1px);color:#fff;border-color:rgba(107,124,255,0.35)}
+  .tab-icon.active{background:linear-gradient(180deg, rgba(107,124,255,0.18), rgba(107,124,255,0.08));border-color:rgba(107,124,255,0.35);color:#fff}
+  .auth-btn{background:transparent;border:1px solid var(--border);padding:8px 12px;border-radius:10px;color:var(--muted);cursor:pointer;transition:all .15s ease}
+  .auth-btn:hover{color:#fff;border-color:rgba(255,255,255,0.22);transform:translateY(-1px)}
+  main{max-width:1120px;margin:24px auto;padding:0 20px;flex:1;width:100%}
+  .section-title{font-size:22px;margin-bottom:8px;color:#fff;letter-spacing:.2px}
+  .section-desc{color:var(--muted);margin-bottom:18px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px}
+  .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));border-radius:14px;padding:16px;border:1px solid var(--border);box-shadow:var(--shadow)}
+  .card:hover{border-color:rgba(255,255,255,0.12)}
+  .avatar{font-size:34px;margin-bottom:10px}
+  .name{font-weight:700;color:#fff;margin-bottom:6px;letter-spacing:.2px}
+  .role{color:var(--muted);font-size:13px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .role-dot{width:10px;height:10px;border-radius:50%;display:inline-block;box-shadow:0 0 0 2px rgba(255,255,255,0.04) inset}
+  .desc{color:var(--muted);font-size:14px;white-space:pre-wrap}
+  .controls{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+  input[type="text"],select{background:transparent;border:1px solid var(--border);padding:10px 12px;border-radius:10px;color:var(--text);min-width:0;transition:all .15s ease}
+  input[type="text"]:focus, select:focus{outline:none;box-shadow:var(--ring);border-color:rgba(107,124,255,0.35)}
+  table{width:100%;border-collapse:separate;border-spacing:0;margin-top:12px}
+  th,td{padding:12px 10px;border-bottom:1px solid var(--border);text-align:left;color:var(--muted);vertical-align:top}
+  th{color:#c9d2db;font-weight:700;background:rgba(255,255,255,0.02);position:sticky;top:0}
+  tbody tr:hover td{background:rgba(107,124,255,0.06)}
+  .editable{background:rgba(107,124,255,0.06);border-radius:8px;padding:8px;outline:none}
+  .editable:focus{box-shadow:var(--ring)}
+  .editable.changed{background:rgba(34,197,94,0.10);border:1px dashed rgba(34,197,94,0.35)}
+  .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);z-index:1000}
+  .modal.show{display:flex}
+  .modal-card{width:100%;max-width:440px;background:var(--card);border-radius:14px;padding:18px;border:1px solid var(--border);box-shadow:var(--shadow)}
+  .field{margin-bottom:12px}
+  label{display:block;color:var(--muted);font-size:13px;margin-bottom:6px}
+  input[type="email"],input[type="password"]{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--text);transition:all .15s ease}
+  input[type="email"]:focus,input[type="password"]:focus{outline:none;box-shadow:var(--ring);border-color:rgba(107,124,255,0.35)}
+  .submit{width:100%;padding:10px;border-radius:10px;border:none;background:linear-gradient(90deg, var(--accent), var(--accent-2));color:white;cursor:pointer;transition:transform .15s ease}
+  .submit:hover{transform:translateY(-1px)}
+  .toast{position:fixed;right:20px;bottom:20px;background:var(--card);padding:10px 14px;border-radius:10px;border:1px solid var(--border);color:var(--text);box-shadow:var(--shadow-sm)}
+  .small-btn{padding:9px 12px;border-radius:10px;border:1px solid var(--border);background:transparent;color:#d9e2ea;cursor:pointer;margin-left:6px;transition:all .15s ease}
+  .small-btn:hover{transform:translateY(-1px);border-color:rgba(255,255,255,0.18)}
+  .approve{background:var(--success);color:#06150b;border:0}
+  .reject{background:var(--danger);color:white;border:0}
+  .loading{display:flex;flex-direction:column;align-items:center;gap:8px;color:var(--muted);padding:24px}
+  .spinner{width:30px;height:30px;border-radius:50%;border:3px solid var(--border);border-top-color:var(--accent)}
+  .controls-right{margin-left:auto;display:flex;gap:8px;align-items:center}
+  footer{padding:12px 16px;color:var(--muted);font-size:13px;border-top:1px solid var(--border);text-align:center}
+  .pagination{display:flex;gap:8px;align-items:center;margin-top:12px;justify-content:flex-end}
+  .muted{color:var(--muted)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spinner{animation:spin 1s linear infinite}
+  @media (max-width:600px){.grid{grid-template-columns:repeat(auto-fill,minmax(170px,1fr))}}
+
+  /* Логи */
+  .log-table td{white-space:pre-wrap;word-break:break-word}
+
+  /* Профиль — на всю ширину блока секции */
+  #profile-card{padding:0;border:none;background:transparent;box-shadow:none}
+  .profile-panel{width:100%;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));border:1px solid var(--border);border-radius:14px;padding:20px;box-shadow:var(--shadow)}
+  .profile-header{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+  .profile-avatar{font-size:50px;line-height:1;border-radius:12px;background:rgba(255,255,255,0.04);padding:10px}
+  .profile-name{font-size:22px;font-weight:800;color:#fff;letter-spacing:.2px}
+  .profile-role{display:flex;align-items:center;gap:8px;color:var(--muted)}
+  .profile-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+  .profile-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;color:var(--muted)}
+  .profile-desc{margin-top:10px;color:#cdd6df;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<header>
+  <div class="tabs" role="tablist" aria-label="Навигация">
+    <!-- Users -->
+    <button class="tab-icon active" data-tab="users" id="tab-users" title="Пользователи" aria-label="Пользователи">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 7h5l2 2h11v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"></path>
+        <path d="M3 7V6a2 2 0 0 1 2-2h4l2 2h6"></path>
+      </svg>
+    </button>
+
+    <!-- Tables -->
+    <button class="tab-icon" data-tab="tables" id="tab-tables" title="Таблицы" aria-label="Таблицы" style="display:none">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 9h18M9 21V9"></path></svg>
+    </button>
+
+    <!-- Requests -->
+    <button class="tab-icon" data-tab="requests" id="tab-requests" title="Заявки" aria-label="Заявки" style="display:none">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1"></rect></svg>
+    </button>
+
+    <!-- Logs (admin only) -->
+    <button class="tab-icon" data-tab="logs" id="tab-logs" title="Логирование" aria-label="Логирование" style="display:none">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18M6 11h12M9 15h6"></path></svg>
+    </button>
+
+    <!-- Profile -->
+    <button class="tab-icon" data-tab="profile" id="tab-profile" title="Профиль" aria-label="Профиль" style="display:none">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+    </button>
+  </div>
+
+  <div>
+    <button id="btn-login" class="auth-btn" title="Вход">Вход</button>
+    <button id="btn-logout" class="auth-btn" title="Выход" style="display:none">Выход</button>
+  </div>
+</header>
+
+<main>
+  <!-- Users -->
+  <section id="section-users">
+    <h2 class="section-title">Пользователи</h2>
+    <p class="section-desc">Список участников системы</p>
+
+    <div class="controls">
+      <input id="search" type="text" placeholder="Поиск по имени..." />
+      <select id="role-filter"><option value="">Все роли</option></select>
+      <div class="controls-right">
+        <button id="refresh-users" class="small-btn">Обновить</button>
+      </div>
+    </div>
+
+    <div id="users-grid" class="grid">
+      <div class="card loading"><div class="spinner"></div><div>Загрузка пользователей...</div></div>
+    </div>
+
+    <div style="margin-top:12px; text-align:center">
+      <button id="load-more" class="small-btn" style="display:none">Загрузить ещё</button>
+    </div>
+  </section>
+
+  <!-- Table data -->
+  <section id="section-tables" style="display:none">
+    <h2 class="section-title">Таблица</h2>
+    <p class="section-desc">Данные из Google Таблиц</p>
+    <div style="display:flex;gap:10px;margin-bottom:12px">
+      <button id="refresh-table" class="small-btn" style="display:inline-block">Обновить</button>
+      <button id="save-table" class="small-btn" style="display:none">Сохранить</button>
+    </div>
+    <div id="table-wrap" class="card">
+      <div id="table-body"> </div>
+    </div>
+  </section>
+
+  <!-- Requests (admin) -->
+  <section id="section-requests" style="display:none">
+    <h2 class="section-title">Заявки на регистрацию</h2>
+    <p class="section-desc">Заявки из листа "Заявки на регистрацию"</p>
+    <div class="controls">
+      <button id="refresh-requests" class="small-btn">Обновить</button>
+    </div>
+    <div id="requests-list" style="margin-top:12px"></div>
+    <div id="requests-loading" class="loading" style="display:none"><div class="spinner"></div><div>Загрузка...</div></div>
+  </section>
+
+  <!-- Logs (admin-only) -->
+  <section id="section-logs" style="display:none">
+    <h2 class="section-title">Логи аудита</h2>
+    <p class="section-desc">Журнал действий (только для администраторов)</p>
+
+    <div class="controls" style="align-items:center">
+      <input id="logs-search" type="text" placeholder="Поиск по actor/action/target..." />
+      <select id="logs-page-size">
+        <option value="20">20</option>
+        <option value="50" selected>50</option>
+        <option value="100">100</option>
+      </select>
+      <div class="controls-right">
+        <button id="refresh-logs" class="small-btn">Обновить</button>
+      </div>
+    </div>
+
+    <div id="logs-wrap" class="card">
+      <div id="logs-body" style="min-height:160px">
+        <div class="loading"><div class="spinner"></div><div>Загрузка логов...</div></div>
+      </div>
+      <div class="pagination" style="margin-top:10px">
+        <div class="muted" id="logs-pager-info"></div>
+        <div>
+          <button id="logs-prev" class="small-btn">◀</button>
+          <button id="logs-next" class="small-btn">▶</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Profile -->
+  <section id="section-profile" style="display:none">
+    <h2 class="section-title">Ваш профиль</h2>
+    <p class="section-desc">Личная информация</p>
+    <div id="profile-card" class="card loading"><div class="spinner"></div><div>Загрузка профиля...</div></div>
+  </section>
+</main>
+
+<!-- Login modal -->
+<div id="modal-login" class="modal" aria-hidden="true">
+  <div class="modal-card">
+    <h3 style="margin-bottom:8px">Авторизация</h3>
+    <form id="form-auth">
+      <div class="field">
+        <label for="auth-email">Почта</label>
+        <input id="auth-email" type="email" required />
+      </div>
+      <div class="field">
+        <label for="auth-pass">Пароль</label>
+        <input id="auth-pass" type="password" required />
+      </div>
+      <div id="auth-error" style="color:var(--danger);min-height:18px;margin-bottom:8px"></div>
+      <button class="submit" type="submit">Войти</button>
+    </form>
+  </div>
+</div>
+
+<!-- Logout confirmation modal -->
+<div id="modal-logout" class="modal" aria-hidden="true">
+  <div class="modal-card" style="max-width:360px">
+    <h3 style="margin-bottom:8px">Подтвердите выход</h3>
+    <p style="color:var(--muted);margin-bottom:16px">Вы уверены, что хотите выйти из системы?</p>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button id="cancel-logout" class="small-btn" style="background:transparent;border:1px solid var(--border);color:var(--muted)">Отмена</button>
+      <button id="confirm-logout" class="small-btn" style="background:var(--danger);color:white">Выйти</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" style="display:none"></div>
+
+<footer>Система пользователей</footer>
+
+<script>
+  // Client-side script
+  let allUsers = [];
+  let allRoles = [];
+  let currentUserEmail = '';
+  let isAdmin = false;
+
+  let cachedTable = null;
+  let tableSettings = null;
+
+  let usersPage = 1;
+  const PAGE_SIZE = 30;
+  let usersTotal = 0;
+  let allUsersLoaded = false;
+  let bulkLoading = false;
+  let pendingFilter = null;
+
+  let logsPage = 1;
+  let logsTotal = 0;
+
+  let loaded = { users: false, tables: false, requests: false, logs: false, profile: false };
+
+  const COOLDOWN_MS = 800;
+  function withCooldown(handler, ms = COOLDOWN_MS) {
+    let last = 0;
+    return function (...args) {
+      const now = Date.now();
+      if (now - last < ms) return;
+      last = now;
+      return handler.apply(this, args);
+    };
+  }
+  function disableDuring(el, promise) {
+    if (!el) return Promise.resolve(promise);
+    const prev = el.disabled;
+    el.disabled = true;
+    return Promise.resolve(promise).finally(() => { el.disabled = prev; });
+  }
+
+  function normalizeColorClient(v){
+    const s = String(v || '').trim();
+    if (/^#([0-9a-fA-F]{6})$/.test(s)) return s;
+    if (/^[0-9a-fA-F]{6}$/.test(s)) return '#' + s;
+    if (/^#([0-9a-fA-F]{3})$/.test(s)) return '#' + s.slice(1).split('').map(ch => ch + ch).join('');
+    if (/^[0-9a-fA-F]{3}$/.test(s)) return '#' + s.split('').map(ch => ch + ch).join('');
+    return '#5865F2';
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    initUI();
+    setupHandlers();
+    loadPublicUsersPage(1);
+    bootstrapAuthFromServer();
+  });
+
+  function initUI(){ showSection('users'); }
+
+  function setupHandlers(){
+    document.getElementById('btn-login').addEventListener('click', withCooldown(openLogin));
+    document.getElementById('btn-logout').addEventListener('click', withCooldown(() => {
+      document.getElementById('modal-logout').classList.add('show');
+      document.getElementById('modal-logout').setAttribute('aria-hidden','false');
+    }));
+    document.getElementById('cancel-logout').addEventListener('click', () => {
+      document.getElementById('modal-logout').classList.remove('show');
+      document.getElementById('modal-logout').setAttribute('aria-hidden','true');
+    });
+    document.getElementById('confirm-logout').addEventListener('click', withCooldown(() => {
+      document.getElementById('modal-logout').classList.remove('show');
+      document.getElementById('modal-logout').setAttribute('aria-hidden','true');
+      performLogoutServer();
+    }));
+
+    document.getElementById('form-auth').addEventListener('submit', function(e){
+      e.preventDefault();
+      withCooldown(authSubmit)();
+    });
+
+    document.querySelectorAll('.tab-icon').forEach(t => {
+      t.addEventListener('click', withCooldown(function(){
+        const tab = this.dataset.tab;
+        if ((tab === 'tables' || tab === 'profile' || tab === 'requests' || tab === 'logs') && !sessionStorage.getItem('sessionToken')) {
+          openLogin();
+          return;
+        }
+        showSection(tab);
+      }));
+    });
+
+    document.getElementById('search').addEventListener('input', debounce(searchUsers, 220));
+    document.getElementById('role-filter').addEventListener('change', applyFilters);
+    document.getElementById('modal-login').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeLogin(); });
+    document.getElementById('load-more').addEventListener('click', withCooldown(function(){ loadPublicUsersPage(usersPage + 1); }));
+    document.getElementById('refresh-users').addEventListener('click', withCooldown(function(){ loaded.users = false; usersPage = 1; allUsers = []; allUsersLoaded = false; loadPublicUsersPage(1); }));
+
+    document.getElementById('refresh-table').addEventListener('click', withCooldown(function(){ loaded.tables = false; loadTable(); }));
+
+    document.getElementById('refresh-requests').addEventListener('click', withCooldown(function(){ loaded.requests = false; loadRegistrationRequests(); }));
+
+    document.getElementById('refresh-logs').addEventListener('click', withCooldown(function(){ loaded.logs = false; loadAuditLogs(1); }));
+    document.getElementById('logs-prev').addEventListener('click', withCooldown(function(){ if (logsPage > 1) loadAuditLogs(logsPage - 1); }));
+    document.getElementById('logs-next').addEventListener('click', withCooldown(function(){
+      const pageSize = Number(document.getElementById('logs-page-size').value);
+      if ((logsPage * pageSize) < logsTotal) loadAuditLogs(logsPage + 1);
+    }));
+    document.getElementById('logs-search').addEventListener('input', debounce(filterLogsClient, 180));
+  }
+
+  function openLogin(){
+    document.getElementById('modal-login').classList.add('show');
+    document.getElementById('modal-login').setAttribute('aria-hidden','false');
+    setTimeout(()=>document.getElementById('auth-email').focus(),50);
+  }
+  function closeLogin(){
+    document.getElementById('modal-login').classList.remove('show');
+    document.getElementById('modal-login').setAttribute('aria-hidden','true');
+    document.getElementById('auth-error').textContent = '';
+    document.getElementById('form-auth').reset();
+  }
+
+  function authSubmit(){
+    const email = document.getElementById('auth-email').value.trim();
+    const pass = document.getElementById('auth-pass').value;
+    if (!email || !pass) { document.getElementById('auth-error').textContent = 'Введите почту и пароль'; return; }
+    document.getElementById('auth-error').textContent = '';
+    showToast('Проверка...', 1200);
+    google.script.run
+      .withSuccessHandler(res => {
+        if (res && res.authorized) {
+          sessionStorage.setItem('sessionToken', res.token || '');
+          sessionStorage.setItem('currentUserEmail', email);
+          localStorage.setItem('isAdmin', res.isAdmin ? 'true' : 'false');
+
+          isAdmin = !!res.isAdmin;
+          currentUserEmail = email;
+
+          document.getElementById('btn-login').style.display = 'none';
+          document.getElementById('btn-logout').style.display = 'inline-block';
+          document.getElementById('tab-profile').style.display = 'inline-block';
+          if (isAdmin) {
+            showAdminTabs();
+          } else {
+            // показать Таблицы для авторизованных не-админов (только чтение)
+            document.getElementById('tab-tables').style.display = 'inline-block';
+          }
+          closeLogin();
+          showToast('Вход выполнен', 1500);
+          loadAllAfterAuth();
+        } else {
+          document.getElementById('auth-error').textContent = res && res.error ? res.error : 'Ошибка авторизации';
+        }
+      })
+      .withFailureHandler(() => { document.getElementById('auth-error').textContent = 'Ошибка сервера'; })
+      .checkAuth(email, pass);
+  }
+
+  function showAdminTabs(){
+    document.getElementById('tab-requests').style.display = 'inline-block';
+    document.getElementById('tab-tables').style.display = 'inline-block';
+    document.getElementById('tab-logs').style.display = 'inline-block';
+  }
+
+  function loadAllAfterAuth(){
+    loadPublicUsersPage(1);
+    if (isAdmin) { loadRegistrationRequests(); }
+    loadProfile();
+  }
+
+  function performLogoutServer(){
+    const token = sessionStorage.getItem('sessionToken') || '';
+    if (!token) { performLogoutLocal(); return; }
+    google.script.run
+      .withSuccessHandler(() => { performLogoutLocal(); })
+      .withFailureHandler(() => { performLogoutLocal(); })
+      .logout(token);
+  }
+
+  function performLogoutLocal(){
+    sessionStorage.removeItem('sessionToken');
+    sessionStorage.removeItem('currentUserEmail');
+    localStorage.removeItem('isAdmin');
+    currentUserEmail = '';
+    isAdmin = false;
+    document.getElementById('btn-login').style.display = 'inline-block';
+    document.getElementById('btn-logout').style.display = 'none';
+    document.getElementById('tab-requests').style.display = 'none';
+    document.getElementById('tab-tables').style.display = 'none';
+    document.getElementById('tab-logs').style.display = 'none';
+    document.getElementById('tab-profile').style.display = 'none';
+    showToast('Вы вышли', 1500);
+    showSection('users');
+  }
+
+  function showSection(name){
+    ['section-users','section-tables','section-requests','section-logs','section-profile'].forEach(id=>{
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.style.display = id === 'section-' + name ? '' : 'none';
+    });
+    document.querySelectorAll('.tab-icon').forEach(t=>t.classList.remove('active'));
+    const tabBtn = document.querySelector(`.tab-icon[data-tab="${name}"]`);
+    if (tabBtn) tabBtn.classList.add('active');
+
+    if (name === 'users' && !loaded.users) { loadPublicUsersPage(1); }
+    if (name === 'tables' && !loaded.tables) { loadTable(); }
+    if (name === 'requests' && !loaded.requests) { loadRegistrationRequests(); }
+    if (name === 'logs' && !loaded.logs) { loadAuditLogs(1); }
+    if (name === 'profile' && !loaded.profile) { loadProfile(); }
+  }
+
+  function bootstrapAuthFromServer(){
+    const token = sessionStorage.getItem('sessionToken');
+    if (!token) return;
+    google.script.run
+      .withSuccessHandler(res => {
+        if (res && res.valid) {
+          isAdmin = !!res.isAdmin;
+          currentUserEmail = sessionStorage.getItem('currentUserEmail') || res.email || '';
+          document.getElementById('btn-login').style.display = 'none';
+          document.getElementById('btn-logout').style.display = 'inline-block';
+          document.getElementById('tab-profile').style.display = 'inline-block';
+          if (isAdmin) {
+            showAdminTabs();
+          } else {
+            // показать Таблицы для авторизованных не-админов (только чтение)
+            document.getElementById('tab-tables').style.display = 'inline-block';
+          }
+          loadAllAfterAuth();
+        } else {
+          performLogoutLocal();
+        }
+      })
+      .withFailureHandler(() => { /* остаёмся гостем */ })
+      .getSessionInfo(token);
+  }
+
+  // ----- Users (pagination) -----
+  function loadPublicUsersPage(page) {
+    usersPage = page;
+    const grid = document.getElementById('users-grid');
+    if (page === 1 && allUsers.length === 0) {
+      grid.innerHTML = '<div class="card loading"><div class="spinner"></div><div>Загрузка...</div></div>';
+    }
+    google.script.run
+      .withSuccessHandler(res=>{
+        if (!res) { grid.innerHTML = '<div class="card">Ошибка загрузки</div>'; return; }
+        usersTotal = res.total || usersTotal;
+        if (page === 1) {
+          allUsers = res.users || [];
+        } else {
+          allUsers = allUsers.concat(res.users || []);
+        }
+        allUsersLoaded = (res.page * res.pageSize) >= usersTotal;
+        populateRoles(allUsers);
+        renderUsers(allUsers);
+        const moreBtn = document.getElementById('load-more');
+        moreBtn.style.display = !allUsersLoaded ? 'inline-block' : 'none';
+
+        if (pendingFilter) {
+          applyFilters();
+          pendingFilter = null;
+        }
+        loaded.users = true;
+      })
+      .withFailureHandler(()=> { grid.innerHTML = '<div class="card">Ошибка загрузки</div>'; })
+      .getPublicUserDataPage(page, PAGE_SIZE);
+  }
+
+  function populateRoles(users){
+    const set = new Set();
+    users.forEach(u => { if (u[2]) set.add(u[2]); });
+    allRoles = Array.from(set).sort();
+    const sel = document.getElementById('role-filter');
+    sel.innerHTML = '<option value="">Все роли</option>';
+    allRoles.forEach(r=>{ const opt = document.createElement('option'); opt.value = r; opt.textContent = r; sel.appendChild(opt); });
+  }
+
+  function searchUsers(){
+    const q = document.getElementById('search').value.trim();
+    if (!allUsersLoaded) {
+      pendingFilter = q;
+      bulkLoadAllUsers();
+    } else {
+      applyFilters();
+    }
+  }
+
+  // Последовательная догрузка всех страниц без setTimeout и гонок
+  function bulkLoadAllUsers(){
+    if (bulkLoading) return;
+    if (allUsersLoaded) { applyFilters(); return; }
+
+    bulkLoading = true;
+    showToast('Загружаю всех пользователей для поиска...', 1500);
+
+    const pageSize = PAGE_SIZE;
+    const loadNext = (nextPage) => {
+      google.script.run
+        .withSuccessHandler(res => {
+          if (!res) { bulkLoading = false; applyFilters(); return; }
+          const users = res.users || [];
+          const total = res.total || usersTotal;
+          const ps = res.pageSize || pageSize;
+
+          usersTotal = total;
+          allUsers = allUsers.concat(users);
+          usersPage = res.page || nextPage;
+          allUsersLoaded = (usersPage * ps) >= usersTotal;
+
+          if (allUsersLoaded) {
+            bulkLoading = false;
+            applyFilters();
+          } else {
+            loadNext(usersPage + 1);
+          }
+        })
+        .withFailureHandler(() => { bulkLoading = false; applyFilters(); })
+        .getPublicUserDataPage(nextPage, pageSize);
+    };
+
+    loadNext(usersPage + 1);
+  }
+
+  function applyFilters(){
+    const q = document.getElementById('search').value.trim().toLowerCase();
+    const role = document.getElementById('role-filter').value;
+    let filtered = allUsers.slice();
+    if (q) filtered = filtered.filter(u => (String(u[1]||'').toLowerCase().includes(q)));
+    if (role) filtered = filtered.filter(u => u[2] === role);
+    renderUsers(filtered);
+  }
+
+  function renderUsers(users){
+    const grid = document.getElementById('users-grid');
+    if (!users || users.length === 0) { grid.innerHTML = '<div class="card">Пользователи не найдены</div>'; return; }
+    const frag = document.createDocumentFragment();
+    users.forEach(u=>{
+      const [emoji,name,role,color,email,desc] = u;
+      const colorHex = normalizeColorClient(color);
+
+      const card = document.createElement('div'); card.className='card';
+      const av = document.createElement('div'); av.className='avatar'; av.textContent = emoji || '👤';
+      const nm = document.createElement('div'); nm.className='name'; nm.textContent = name || 'Пользователь';
+      nm.style.color = colorHex;
+
+      const rl = document.createElement('div'); rl.className='role';
+      const dot = document.createElement('span'); dot.className='role-dot'; dot.style.backgroundColor = colorHex;
+      const rlText = document.createElement('span'); rlText.textContent = role || '';
+      rl.appendChild(dot); rl.appendChild(rlText);
+
+      const d = document.createElement('div'); d.className='desc'; d.textContent = desc || '';
+      card.appendChild(av); card.appendChild(nm); card.appendChild(rl); card.appendChild(d);
+      frag.appendChild(card);
+    });
+    grid.innerHTML = '';
+    grid.appendChild(frag);
+  }
+
+  // ----- Table -----
+  function loadTable(){
+    const wrap = document.getElementById('table-wrap');
+    wrap.innerHTML = '<div class="loading"><div class="spinner"></div><div>Загрузка...</div></div>';
+
+    const token = sessionStorage.getItem('sessionToken') || '';
+    if (!token) { wrap.innerHTML = '<div class="card">Требуется вход</div>'; return; }
+
+    google.script.run
+      .withSuccessHandler(res=>{
+        if (res && res.error) { wrap.innerHTML = '<div class="card">Ошибка: '+(res.error||'')+'</div>'; return; }
+        cachedTable = res.data || [];
+        tableSettings = res.settings || null;
+        renderTable(cachedTable);
+        loaded.tables = true;
+      })
+      .withFailureHandler(()=> { wrap.innerHTML = '<div class="card">Ошибка загрузки</div>'; })
+      .getTableDataWithToken(token); // доступно любому авторизованному пользователю
+  }
+
+  function renderTable(data){
+    const wrap = document.getElementById('table-wrap');
+    if (!data || data.length === 0) { wrap.innerHTML = '<div class="card">Данные не найдены</div>'; return; }
+    const table = document.createElement('table');
+
+    // Без отображения заголовка: показываем только редактируемые ячейки (tbody)
+    const tbody = document.createElement('tbody');
+    for (let i=1;i<data.length;i++){
+      const tr = document.createElement('tr');
+      for (let j=0;j<data[i].length;j++){
+        const td = document.createElement('td'); td.textContent = data[i][j];
+
+        if (isAdmin) {
+          td.contentEditable = true;
+          td.className = 'editable';
+          (function(r,c,cell){
+            cell.addEventListener('input', function(){
+              if (!cachedTable[r]) cachedTable[r]=[];
+              cachedTable[r][c] = this.textContent;
+              this.classList.add('changed');
+              document.getElementById('save-table').style.display = 'inline-block';
+            });
+          })(i,j,td);
+        } else {
+          td.contentEditable = false;
+          td.className = '';
+        }
+
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    wrap.innerHTML = '';
+    wrap.appendChild(table);
+
+    // сохранение только для админов
+    document.getElementById('save-table').style.display = isAdmin ? 'inline-block' : 'none';
+    document.getElementById('save-table').onclick = withCooldown(saveTable);
+  }
+
+  function saveTable(){
+    if (!cachedTable || !tableSettings) { showToast('Нет данных для сохранения',1500); return; }
+    const token = sessionStorage.getItem('sessionToken') || '';
+    if (!token) { showToast('Требуется вход', 1500); return; }
+    if (!isAdmin) { showToast('Только администратор может сохранять', 2000); return; }
+
+    showToast('Сохранение...', 1500);
+    const btn = document.getElementById('save-table');
+    const p = new Promise((resolve) => {
+      google.script.run
+        .withSuccessHandler(res=>{
+          if (res && res.success) {
+            showToast('Сохранено',1500);
+            document.getElementById('save-table').style.display = 'none';
+            loadTable();
+          } else {
+            showToast('Ошибка: ' + (res && res.error ? res.error : ''), 2500);
+          }
+          resolve();
+        })
+        .withFailureHandler(()=> { showToast('Ошибка сервера',2000); resolve(); })
+        .updateTableDataWithToken(token, tableSettings.sheetName, tableSettings.range, cachedTable);
+    });
+    disableDuring(btn, p);
+  }
+
+  // ----- Profile -----
+  function loadProfile(){
+    const card = document.getElementById('profile-card');
+    const email = sessionStorage.getItem('currentUserEmail') || currentUserEmail || '';
+    if (!email) { card.innerHTML = '<div class="card">Профиль не найден</div>'; return; }
+    card.innerHTML = '<div class="loading"><div class="spinner"></div><div>Загрузка профиля...</div></div>';
+    google.script.run
+      .withSuccessHandler(u=>{ if (!u) { card.innerHTML = '<div class="card">Профиль не найден</div>'; return; } renderProfile(u); loaded.profile = true; })
+      .withFailureHandler(()=> { card.innerHTML = '<div class="card">Ошибка загрузки профиля</div>'; })
+      .getUserByEmail(email);
+  }
+
+  function renderProfile(u){
+    const card = document.getElementById('profile-card'); card.innerHTML = '';
+    const panel = document.createElement('div'); panel.className = 'profile-panel';
+    const header = document.createElement('div'); header.className = 'profile-header';
+
+    const av = document.createElement('div'); av.className='profile-avatar'; av.textContent = u.emoji || '👤';
+    const titleWrap = document.createElement('div');
+    const nm = document.createElement('div'); nm.className='profile-name'; nm.textContent = u.name || '';
+
+    const colorHex = normalizeColorClient(u.color);
+    nm.style.color = colorHex;
+
+    const role = document.createElement('div'); role.className='profile-role';
+    const dot = document.createElement('span'); dot.className='profile-dot'; dot.style.background = colorHex;
+    const roleText = document.createElement('span'); roleText.textContent = u.role || '';
+    role.appendChild(dot); role.appendChild(roleText);
+    titleWrap.appendChild(nm); titleWrap.appendChild(role);
+
+    header.appendChild(av); header.appendChild(titleWrap);
+
+    const meta = document.createElement('div'); meta.className = 'profile-meta'; meta.style.marginTop = '8px';
+    const mail = document.createElement('div'); mail.textContent = 'Почта: ' + (u.email || '');
+    const adm = document.createElement('div'); adm.textContent = 'Админ: ' + (u.isAdmin ? 'Да' : 'Нет');
+    meta.appendChild(mail); meta.appendChild(adm);
+
+    const d = document.createElement('div'); d.className='profile-desc'; d.textContent = u.description || '';
+
+    panel.appendChild(header);
+    panel.appendChild(meta);
+    panel.appendChild(d);
+    card.appendChild(panel);
+  }
+
+  // ----- Requests (admin-protected) -----
+  function loadRegistrationRequests(){
+    if (!isAdmin) return;
+    const list = document.getElementById('requests-list');
+    const loading = document.getElementById('requests-loading');
+    list.innerHTML = ''; loading.style.display = 'block';
+    google.script.run
+      .withSuccessHandler(reqs=>{ loading.style.display = 'none'; renderRequests(reqs || []); loaded.requests = true; })
+      .withFailureHandler(()=> { loading.style.display = 'none'; list.innerHTML = '<div class="card">Ошибка загрузки заявок</div>'; })
+      .getRegistrationRequests();
+  }
+
+  function renderRequests(reqs){
+    const list = document.getElementById('requests-list');
+    list.innerHTML = '';
+    if (!reqs || reqs.length === 0) { list.innerHTML = '<div class="card">Заявок нет</div>'; return; }
+    const frag = document.createDocumentFragment();
+    reqs.forEach(r=>{
+      const card = document.createElement('div'); card.className='card'; card.style.display='flex'; card.style.justifyContent='space-between'; card.style.alignItems='center';
+      const left = document.createElement('div');
+      const av = document.createElement('div'); av.textContent = r.emoji || '👤'; av.style.fontSize='22px';
+      const title = document.createElement('div'); title.className='name'; title.textContent = r.name || '(Без имени)';
+      const mail = document.createElement('div'); mail.className='desc'; mail.textContent = r.email || '';
+      left.appendChild(av); left.appendChild(title); left.appendChild(mail);
+      const right = document.createElement('div');
+      const approve = document.createElement('button'); approve.className='small-btn approve'; approve.textContent='Принять';
+      const reject = document.createElement('button'); reject.className='small-btn reject'; reject.textContent='Отклонить';
+      approve.addEventListener('click', function(){ handleApprove(r._row, approve, reject); });
+      reject.addEventListener('click', function(){ handleReject(r._row, approve, reject); });
+      right.appendChild(approve); right.appendChild(reject);
+      card.appendChild(left); card.appendChild(right); frag.appendChild(card);
+    });
+    list.appendChild(frag);
+  }
+
+  function handleApprove(row, btnA, btnR){
+    if (!confirm('Добавить пользователя?')) return;
+    withCooldown(() => {
+      const token = sessionStorage.getItem('sessionToken') || '';
+      const p = new Promise((resolve) => {
+        google.script.run
+          .withSuccessHandler(res=>{
+            if (res && res.success) {
+              showToast('Пользователь добавлен',1500);
+              // Обновляем заявки и пользователей
+              loaded.requests = false; loadRegistrationRequests();
+              loaded.users = false; usersPage = 1; allUsers = []; allUsersLoaded = false; loadPublicUsersPage(1);
+            } else {
+              showToast('Ошибка: ' + (res && res.error ? res.error : ''), 2500);
+            }
+            resolve();
+          })
+          .withFailureHandler(()=> { showToast('Ошибка сервера',2000); resolve(); })
+          .approveRegistrationRequest(token, row);
+      });
+      disableDuring(btnA, disableDuring(btnR, p));
+    })();
+  }
+
+  function handleReject(row, btnA, btnR){
+    if (!confirm('Удалить заявку?')) return;
+    withCooldown(() => {
+      const token = sessionStorage.getItem('sessionToken') || '';
+      const p = new Promise((resolve) => {
+        google.script.run
+          .withSuccessHandler(res=>{
+            if (res && res.success) {
+              showToast('Заявка удалена',1500);
+              loaded.requests = false; loadRegistrationRequests();
+            } else {
+              showToast('Ошибка: ' + (res && res.error ? res.error : ''), 2500);
+            }
+            resolve();
+          })
+          .withFailureHandler(()=> { showToast('Ошибка сервера',2000); resolve(); })
+          .rejectRegistrationRequest(token, row);
+      });
+      disableDuring(btnA, disableDuring(btnR, p));
+    })();
+  }
+
+  // ----- Audit logs (admin-only) -----
+  function loadAuditLogs(page) {
+    if (!isAdmin) {
+      document.getElementById('logs-body').innerHTML = '<div class="card">Доступ запрещён</div>';
+      return;
+    }
+    logsPage = page || 1;
+    const pageSize = Number(document.getElementById('logs-page-size').value) || 50;
+    const wrap = document.getElementById('logs-body');
+    wrap.innerHTML = '<div class="loading"><div class="spinner"></div><div>Загрузка логов...</div></div>';
+    const token = sessionStorage.getItem('sessionToken') || '';
+    if (!token) { wrap.innerHTML = '<div class="card">Требуется вход</div>'; return; }
+
+    google.script.run
+      .withSuccessHandler(res=>{
+        if (res && res.error) { wrap.innerHTML = '<div class="card">Ошибка: '+(res.error||'')+'</div>'; return; }
+        logsTotal = res.total || 0;
+        renderAuditLogs(res.logs || [], res.page || logsPage, res.pageSize || pageSize, res.total || 0);
+        loaded.logs = true;
+      })
+      .withFailureHandler(()=> { wrap.innerHTML = '<div class="card">Ошибка загрузки логов</div>'; })
+      .getAuditLogsWithToken(token, logsPage, pageSize);
+  }
+
+  function renderAuditLogs(logs, page, pageSize, total) {
+    const wrap = document.getElementById('logs-body');
+    if (!logs || logs.length === 0) {
+      wrap.innerHTML = '<div class="card">Записей нет</div>';
+      document.getElementById('logs-pager-info').textContent = '';
+      return;
+    }
+    const table = document.createElement('table');
+    table.className = 'log-table';
+    const thead = document.createElement('thead');
+    const thr = document.createElement('tr');
+    ['Timestamp','Actor','Action','Target','Details'].forEach(h => { 
+      const th = document.createElement('th'); 
+      th.textContent = h; 
+      thr.appendChild(th); 
+    });
+    thead.appendChild(thr); 
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    logs.forEach(r => {
+      const tr = document.createElement('tr');
+      const tdTs = document.createElement('td'); tdTs.textContent = r.Timestamp || ''; tr.appendChild(tdTs);
+      const tdActor = document.createElement('td'); tdActor.textContent = r.Actor || ''; tr.appendChild(tdActor);
+      const tdAction = document.createElement('td'); tdAction.textContent = r.Action || ''; tr.appendChild(tdAction);
+      const tdTarget = document.createElement('td'); tdTarget.textContent = r.Target || ''; tr.appendChild(tdTarget);
+      const tdDetails = document.createElement('td'); tdDetails.textContent = r.Details || ''; tr.appendChild(tdDetails);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.innerHTML = '';
+    wrap.appendChild(table);
+
+    const start = (page - 1) * pageSize + 1;
+    const end = Math.min(total, page * pageSize);
+    document.getElementById('logs-pager-info').textContent = `Показано ${start}-${end} из ${total}`;
+    logsPage = page;
+  }
+
+  function filterLogsClient(){
+    const q = document.getElementById('logs-search').value.trim().toLowerCase();
+    const rows = Array.from(document.querySelectorAll('#logs-body tbody tr'));
+    rows.forEach(tr => {
+      const text = tr.innerText.toLowerCase();
+      tr.style.display = text.includes(q) ? '' : 'none';
+    });
+  }
+
+  // Utilities
+  function showToast(msg, timeout=2000){
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.style.display = 'block';
+    clearTimeout(t._hid);
+    t._hid = setTimeout(()=>{ t.style.display='none'; }, timeout);
+  }
+
+  function debounce(fn, wait){
+    let t;
+    return function(...args){
+      clearTimeout(t);
+      t = setTimeout(()=>fn.apply(this,args), wait);
+    };
+  }
+</script>
+</body>
+</html>
