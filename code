@@ -67,6 +67,9 @@ function getSettings() {
     if (!settings.REG_REQUESTS_SHEET_NAME) settings.REG_REQUESTS_SHEET_NAME = 'Заявки на регистрацию';
     if (!settings.AUDIT_SHEET_NAME) settings.AUDIT_SHEET_NAME = 'Audit';
     if (!settings.SETTINGS_SHEET_NAME) settings.SETTINGS_SHEET_NAME = 'Настройки';
+    if (!settings.USERS_SHEET_NAME) settings.USERS_SHEET_NAME = 'Пользователи';
+    if (!settings.DATA_SHEET_NAME_PROPERTY) settings.DATA_SHEET_NAME_PROPERTY = 'Лист';
+    if (!settings.DATA_RANGE_PROPERTY) settings.DATA_RANGE_PROPERTY = 'Диапазон';
   }
   return settings;
 }
@@ -248,6 +251,57 @@ function findHeaderIndex(headers, variants) {
     if (idx !== -1) return idx;
   }
   return -1;
+}
+
+/* ----------------------------
+   Password hashing helpers (SHA-256 + per-user salt)
+   ---------------------------- */
+
+function isPasswordHashed(stored) {
+  const s = String(stored || '');
+  return s.startsWith('sha256$') && s.split('$').length === 3;
+}
+
+function hashPassword(plain) {
+  const pwd = String(plain == null ? '' : plain);
+  const salt = Utilities.getUuid().replace(/-/g, '').slice(0, 16);
+  const raw = salt + '\n' + pwd;
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, raw);
+  const hash = Utilities.base64Encode(bytes);
+  return 'sha256$' + salt + '$' + hash;
+}
+
+function verifyPassword(plain, stored) {
+  if (!isPasswordHashed(stored)) {
+    return String(plain) === String(stored);
+  }
+  const parts = String(stored).split('$');
+  const salt = parts[1];
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + '\n' + String(plain == null ? '' : plain));
+  const hash = Utilities.base64Encode(bytes);
+  return ('sha256$' + salt + '$' + hash) === stored;
+}
+
+function tryUpgradePasswordIfNeeded(email, rowOneIndexed, passColOneIndexed, plainPassword) {
+  try {
+    const s = getSettings();
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(s.USERS_SHEET_NAME);
+    if (!sheet) return;
+    const lock = LockService.getScriptLock();
+    lock.waitLock(5000);
+    try {
+      const cell = sheet.getRange(rowOneIndexed, passColOneIndexed);
+      const current = String(cell.getValue() || '');
+      if (!isPasswordHashed(current) && current === String(plainPassword)) {
+        cell.setValue(hashPassword(plainPassword));
+      }
+    } finally {
+      try { lock.releaseLock(); } catch (e) {}
+    }
+  } catch (e) {
+    console.error('tryUpgradePasswordIfNeeded error: ' + e.message);
+  }
 }
 
 /* ----------------------------
@@ -452,7 +506,12 @@ function checkAuth(pochta, password) {
     const mail = String(row[mailIdx] || '').trim();
     if (mail === String(pochta).trim()) {
       const stored = String(row[passIdx] || '');
-      if (stored === String(password)) {
+      const passOk = verifyPassword(password, stored);
+      if (passOk) {
+        // upgrade plaintext to hashed if needed
+        if (!isPasswordHashed(stored)) {
+          tryUpgradePasswordIfNeeded(pochta, i + 2, passIdx + 1, password);
+        }
         clearAuthFailures(pochta);
         const isAdm = adminIdx !== -1 ? cellToBool(row[adminIdx]) : false;
         const token = createSessionToken(pochta);
@@ -701,7 +760,7 @@ function approveRegistrationRequest(token, requestRow) {
     userData.name = neutralizeFormulaCell(userData.name);
     userData.role = neutralizeFormulaCell(userData.role);
     userData.description = neutralizeFormulaCell(userData.description);
-    userData.password = neutralizeFormulaCell(userData.password);
+    // Пароль не нейтрализуем и не записываем в явном виде — он будет захеширован при добавлении
 
     const addResult = addNewUser(userData);
     if (!addResult.success) {
@@ -798,6 +857,8 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
     const headers = getSheetHeaders(sheetName);
     const colorHeaderIdx0 = findHeaderIndex(headers, ['Цвет','color','colour','цвет']);
     const colorColAbs1 = colorHeaderIdx0 >= 0 ? (colorHeaderIdx0 + 1) : -1;
+    const passwordHeaderIdx0 = findHeaderIndex(headers, ['Пароль','password']);
+    const passColAbs1 = passwordHeaderIdx0 >= 0 ? (passwordHeaderIdx0 + 1) : -1;
 
     const rangeStartRow1 = dataRange.getRow();
     const rangeStartCol1 = dataRange.getColumn();
@@ -806,9 +867,11 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
     // ВАЖНО: разрешаем редактировать первую строку диапазона (UI без заголовка)
     const protectFirstRowOfRange = false;
 
-    // Определяем, попадает ли "Цвет" внутрь диапазона и его относительный индекс
+    // Определяем, попадает ли "Цвет" и "Пароль" внутрь диапазона и их относительные индексы
     const colorInRange = colorColAbs1 >= rangeStartCol1 && colorColAbs1 <= (rangeStartCol1 + rngCols - 1);
     const colorRelIdx = colorInRange ? (colorColAbs1 - rangeStartCol1) : -1;
+    const passInRange = passColAbs1 >= rangeStartCol1 && passColAbs1 <= (rangeStartCol1 + rngCols - 1);
+    const passRelIdx = passInRange ? (passColAbs1 - rangeStartCol1) : -1;
 
     const oldValues = dataRange.getValues();
 
@@ -832,6 +895,24 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
 
       const row = newData[i];
       for (let j = 0; j < row.length; j++) {
+        // Специальная обработка столбца "Пароль" в листе Пользователи: хешируем, не логируем в аудите
+        if (sheetIsUsers && passRelIdx >= 0 && j === passRelIdx) {
+          const val = row[j];
+          if (typeof val === 'string') {
+            const trimmed = val.trim();
+            if (trimmed && !isPasswordHashed(trimmed)) {
+              row[j] = hashPassword(trimmed);
+            } else {
+              row[j] = trimmed;
+            }
+          } else if (val == null) {
+            row[j] = '';
+          } else {
+            row[j] = String(val);
+          }
+          continue;
+        }
+
         // Запрет формул: экранируем = + - @
         if (typeof row[j] === 'string') {
           let cell = neutralizeFormulaCell(row[j].trim());
@@ -854,6 +935,7 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
       if (isHeaderOfRange || isFirstRowOfUsers) continue;
 
       for (let j = 0; j < newData[i].length && diffs.length < maxDiffs; j++) {
+        if (sheetIsUsers && passRelIdx >= 0 && j === passRelIdx) continue; // не логируем изменения пароля
         const before = oldValues[i][j];
         const after = newData[i][j];
         if (before !== after) {
@@ -908,13 +990,13 @@ function addNewUser(userData) {
   const sheet = ss.getSheetByName(s.USERS_SHEET_NAME);
   if (!sheet) return { success: false, error: 'Лист "Пользователи" не найден' };
 
-  // Подготовка значений + нейтрализация формул
+  // Подготовка значений + нейтрализация формул (кроме пароля)
   const emojiSafe = truncateGraphemes(neutralizeFormulaCell(userData.emoji || '👤'), 8);
   const nameSafe = neutralizeFormulaCell(userData.name || '');
   const roleSafe = neutralizeFormulaCell(userData.role || '');
   const colorSafe = normalizeHexColor(userData.color || '#5865F2') || '#5865F2';
   const emailSafe = neutralizeFormulaCell(userData.email || '');
-  const passSafe  = neutralizeFormulaCell(userData.password || '');
+  const passHashed = userData.password ? hashPassword(String(userData.password)) : '';
   const descSafe  = neutralizeFormulaCell(userData.description || '');
   const isAdmin   = userData.isAdmin ? true : false;
 
@@ -938,7 +1020,7 @@ function addNewUser(userData) {
       sanitizeString(roleSafe, 50),
       sanitizeString(colorSafe, 20),
       sanitizeString(emailSafe, 200),
-      sanitizeString(passSafe, 200),
+      passHashed,
       sanitizeString(descSafe, 1000),
       isAdmin
     ];

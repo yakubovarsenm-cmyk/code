@@ -320,9 +320,12 @@
       performLogoutServer();
     }));
 
+    // Создаём постоянную троттлированную функцию один раз
+    const throttledAuthSubmit = withCooldown(authSubmit);
+
     document.getElementById('form-auth').addEventListener('submit', function(e){
       e.preventDefault();
-      withCooldown(authSubmit)();
+      throttledAuthSubmit();
     });
 
     document.querySelectorAll('.tab-icon').forEach(t => {
