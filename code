@@ -847,9 +847,7 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
     const rngRows = dataRange.getNumRows();
     const rngCols = dataRange.getNumColumns();
 
-    if (newData.length !== rngRows) {
-      return { success: false, error: `Несоответствие рядам. Ожидалось ${rngRows}, получено ${newData.length}` };
-    }
+    // Проверка по колонкам (строки могут отличаться для поддержки добавления/удаления)
     if (!newData.every(r => Array.isArray(r) && r.length === rngCols)) {
       return { success: false, error: `Несоответствие колонкам. Ожидалось по ${rngCols} значений в строках` };
     }
@@ -889,7 +887,8 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
       const isFirstRowOfUsers = (sheetIsUsers && (rangeStartRow1 + i) === 1);
 
       if (isHeaderOfRange || isFirstRowOfUsers) {
-        newData[i] = oldValues[i];
+        // если защищаем — оставляем как было
+        if (i < oldValues.length) newData[i] = oldValues[i];
         continue;
       }
 
@@ -928,8 +927,9 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
       }
     }
 
-    // Сбор диффов (по финальным значениям)
-    for (let i = 0; i < newData.length && diffs.length < maxDiffs; i++) {
+    // Сбор диффов (по пересечению текущего и нового диапазона)
+    const minRows = Math.min(newData.length, oldValues.length);
+    for (let i = 0; i < minRows && diffs.length < maxDiffs; i++) {
       const isHeaderOfRange = (protectFirstRowOfRange && i === 0);
       const isFirstRowOfUsers = (sheetIsUsers && (rangeStartRow1 + i) === 1);
       if (isHeaderOfRange || isFirstRowOfUsers) continue;
@@ -944,11 +944,32 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
         }
       }
     }
+    if (newData.length > oldValues.length) {
+      diffs.push(`added ${newData.length - oldValues.length} row(s)`);
+    } else if (newData.length < oldValues.length) {
+      diffs.push(`removed ${oldValues.length - newData.length} row(s)`);
+    }
 
     const lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
-      dataRange.setValues(newData);
+      // Расширяем лист при необходимости
+      const neededLastRow = rangeStartRow1 + newData.length - 1;
+      const maxRows = sheet.getMaxRows();
+      if (neededLastRow > maxRows) {
+        sheet.insertRowsAfter(maxRows, neededLastRow - maxRows);
+      }
+
+      // Обновляем данные целиком по новому размеру
+      const targetRange = sheet.getRange(rangeStartRow1, rangeStartCol1, newData.length, rngCols);
+      targetRange.setValues(newData);
+
+      // Обновляем диапазон в настройках под новый размер
+      const newA1 = targetRange.getA1Notation();
+      const settingsSheet = ss.getSheetByName(s.SETTINGS_SHEET_NAME);
+      if (settingsSheet) {
+        settingsSheet.getRange(2, 2).setValue(newA1);
+      }
     } finally {
       lock.releaseLock();
     }
@@ -956,7 +977,7 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
     // Сброс кэша заголовков затронутого листа
     CACHE.remove('headers_' + sheetName);
 
-    const details = diffs.length ? `changed ${diffs.length} cells:\n` + diffs.join('\n') : 'no-op';
+    const details = diffs.length ? `changed/resize details:\n` + diffs.slice(0, maxDiffs).join('\n') : 'no-op';
     logAudit(vt.email, 'update_table', `${sheetName}:${range}`, details);
     return { success: true, message: 'Данные таблицы обновлены' };
   } catch (e) {

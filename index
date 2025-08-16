@@ -156,9 +156,13 @@
     <div style="display:flex;gap:10px;margin-bottom:12px">
       <button id="refresh-table" class="small-btn" style="display:inline-block">Обновить</button>
       <button id="save-table" class="small-btn" style="display:none">Сохранить</button>
+      <button id="add-row" class="small-btn" style="display:none">Добавить строку</button>
     </div>
-    <div id="table-wrap" class="card">
+        <div id="table-wrap" class="card">
       <div id="table-body"> </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+        <button id="delete-selected" class="small-btn" style="display:none">Удалить выбранные строки</button>
+      </div>
     </div>
   </section>
 
@@ -268,6 +272,7 @@
   let logsTotal = 0;
 
   let loaded = { users: false, tables: false, requests: false, logs: false, profile: false };
+  let selectedRows = new Set(); // для удаления строк из таблицы
 
   const COOLDOWN_MS = 800;
   function withCooldown(handler, ms = COOLDOWN_MS) {
@@ -346,6 +351,8 @@
     document.getElementById('refresh-users').addEventListener('click', withCooldown(function(){ loaded.users = false; usersPage = 1; allUsers = []; allUsersLoaded = false; loadPublicUsersPage(1); }));
 
     document.getElementById('refresh-table').addEventListener('click', withCooldown(function(){ loaded.tables = false; loadTable(); }));
+    document.getElementById('add-row').addEventListener('click', withCooldown(addRow));
+    document.getElementById('delete-selected').addEventListener('click', withCooldown(deleteSelectedRows));
 
     document.getElementById('refresh-requests').addEventListener('click', withCooldown(function(){ loaded.requests = false; loadRegistrationRequests(); }));
 
@@ -610,33 +617,47 @@
 
   // ----- Table -----
   function loadTable(){
-    const wrap = document.getElementById('table-wrap');
-    wrap.innerHTML = '<div class="loading"><div class="spinner"></div><div>Загрузка...</div></div>';
+    const body = document.getElementById('table-body');
+    body.innerHTML = '<div class="loading"><div class="spinner"></div><div>Загрузка...</div></div>';
 
     const token = sessionStorage.getItem('sessionToken') || '';
-    if (!token) { wrap.innerHTML = '<div class="card">Требуется вход</div>'; return; }
+    if (!token) { body.innerHTML = '<div class="card">Требуется вход</div>'; return; }
 
     google.script.run
       .withSuccessHandler(res=>{
-        if (res && res.error) { wrap.innerHTML = '<div class="card">Ошибка: '+(res.error||'')+'</div>'; return; }
+        if (res && res.error) { body.innerHTML = '<div class="card">Ошибка: '+(res.error||'')+'</div>'; return; }
         cachedTable = res.data || [];
         tableSettings = res.settings || null;
         renderTable(cachedTable);
         loaded.tables = true;
       })
-      .withFailureHandler(()=> { wrap.innerHTML = '<div class="card">Ошибка загрузки</div>'; })
+      .withFailureHandler(()=> { body.innerHTML = '<div class="card">Ошибка загрузки</div>'; })
       .getTableDataWithToken(token); // доступно любому авторизованному пользователю
   }
 
   function renderTable(data){
-    const wrap = document.getElementById('table-wrap');
-    if (!data || data.length === 0) { wrap.innerHTML = '<div class="card">Данные не найдены</div>'; return; }
+    const body = document.getElementById('table-body');
+    if (!data || data.length === 0) { body.innerHTML = '<div class="card">Данные не найдены</div>'; return; }
     const table = document.createElement('table');
 
-    // Без отображения заголовка: показываем только редактируемые ячейки (tbody)
+    // Показываем все строки, включая первую
     const tbody = document.createElement('tbody');
-    for (let i=1;i<data.length;i++){
+    selectedRows = new Set();
+    for (let i=0;i<data.length;i++){
       const tr = document.createElement('tr');
+      // Выбор строки для удаления (только админ)
+      if (isAdmin) {
+        const selTd = document.createElement('td');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.addEventListener('change', function(){
+          if (this.checked) selectedRows.add(i); else selectedRows.delete(i);
+          const delBtn = document.getElementById('delete-selected');
+          delBtn.style.display = isAdmin && selectedRows.size > 0 ? 'inline-block' : 'none';
+        });
+        selTd.appendChild(cb);
+        tr.appendChild(selTd);
+      }
       for (let j=0;j<data[i].length;j++){
         const td = document.createElement('td'); td.textContent = data[i][j];
 
@@ -661,11 +682,14 @@
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
-    wrap.innerHTML = '';
-    wrap.appendChild(table);
+    body.innerHTML = '';
+    body.appendChild(table);
 
-    // сохранение только для админов
+    // сохранение и операции только для админов
     document.getElementById('save-table').style.display = isAdmin ? 'inline-block' : 'none';
+    document.getElementById('add-row').style.display = isAdmin ? 'inline-block' : 'none';
+    const delBtn = document.getElementById('delete-selected');
+    delBtn.style.display = isAdmin && selectedRows.size > 0 ? 'inline-block' : 'none';
     document.getElementById('save-table').onclick = withCooldown(saveTable);
   }
 
@@ -693,6 +717,29 @@
         .updateTableDataWithToken(token, tableSettings.sheetName, tableSettings.range, cachedTable);
     });
     disableDuring(btn, p);
+  }
+
+  function addRow(){
+    if (!isAdmin) return;
+    if (!cachedTable || !Array.isArray(cachedTable)) cachedTable = [];
+    const colCount = (cachedTable[0] && Array.isArray(cachedTable[0])) ? cachedTable[0].length : (tableSettings && Array.isArray(cachedTable[cachedTable.length-1]) ? cachedTable[cachedTable.length-1].length : 1);
+    const newRow = new Array(colCount).fill('');
+    cachedTable.push(newRow);
+    renderTable(cachedTable);
+    document.getElementById('save-table').style.display = 'inline-block';
+  }
+
+  function deleteSelectedRows(){
+    if (!isAdmin) return;
+    if (!selectedRows || selectedRows.size === 0) return;
+    // Удаляем строки начиная с конца, чтобы индексы не смещались
+    const toDelete = Array.from(selectedRows).sort((a,b)=>b-a);
+    for (const idx of toDelete) {
+      if (idx >= 0 && idx < cachedTable.length) cachedTable.splice(idx, 1);
+    }
+    selectedRows.clear();
+    renderTable(cachedTable);
+    document.getElementById('save-table').style.display = 'inline-block';
   }
 
   // ----- Profile -----
