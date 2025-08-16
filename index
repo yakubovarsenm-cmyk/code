@@ -42,10 +42,12 @@
   .controls{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
   input[type="text"],select{background:transparent;border:1px solid var(--border);padding:10px 12px;border-radius:10px;color:var(--text);min-width:0;transition:all .15s ease}
   input[type="text"]:focus, select:focus{outline:none;box-shadow:var(--ring);border-color:rgba(107,124,255,0.35)}
-  table{width:100%;border-collapse:separate;border-spacing:0;margin-top:12px}
-  th,td{padding:12px 10px;border-bottom:1px solid var(--border);text-align:left;color:var(--muted);vertical-align:top}
-  th{color:#c9d2db;font-weight:700;background:rgba(255,255,255,0.02);position:sticky;top:0}
-  tbody tr:hover td{background:rgba(107,124,255,0.06)}
+     table{width:100%;border-collapse:separate;border-spacing:0;margin-top:12px;display:block;overflow-x:auto}
+   th,td{padding:12px 10px;border-bottom:1px solid var(--border);text-align:left;color:var(--muted);vertical-align:top;white-space:nowrap}
+   th{color:#c9d2db;font-weight:700;background:rgba(255,255,255,0.02);position:sticky;top:0}
+   tbody{display:block;min-width:max-content}
+   tbody tr{display:table;table-layout:fixed;width:100%}
+   tbody tr:hover td{background:rgba(107,124,255,0.06)}
   .editable{background:rgba(107,124,255,0.06);border-radius:8px;padding:8px;outline:none}
   .editable:focus{box-shadow:var(--ring)}
   .editable.changed{background:rgba(34,197,94,0.10);border:1px dashed rgba(34,197,94,0.35)}
@@ -86,6 +88,7 @@
   .profile-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
   .profile-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;color:var(--muted)}
   .profile-desc{margin-top:10px;color:#cdd6df;white-space:pre-wrap}
+  #table-wrap{overflow-x:auto}
 </style>
 </head>
 <body>
@@ -156,9 +159,13 @@
     <div style="display:flex;gap:10px;margin-bottom:12px">
       <button id="refresh-table" class="small-btn" style="display:inline-block">Обновить</button>
       <button id="save-table" class="small-btn" style="display:none">Сохранить</button>
+      <button id="add-row" class="small-btn" style="display:none">Добавить строку</button>
     </div>
-    <div id="table-wrap" class="card">
+        <div id="table-wrap" class="card">
       <div id="table-body"> </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+        <button id="delete-selected" class="small-btn" style="display:none">Удалить выбранные строки</button>
+      </div>
     </div>
   </section>
 
@@ -268,6 +275,7 @@
   let logsTotal = 0;
 
   let loaded = { users: false, tables: false, requests: false, logs: false, profile: false };
+  let selectedRows = new Set(); // для удаления строк из таблицы
 
   const COOLDOWN_MS = 800;
   function withCooldown(handler, ms = COOLDOWN_MS) {
@@ -320,9 +328,12 @@
       performLogoutServer();
     }));
 
+    // Создаём постоянную троттлированную функцию один раз
+    const throttledAuthSubmit = withCooldown(authSubmit);
+
     document.getElementById('form-auth').addEventListener('submit', function(e){
       e.preventDefault();
-      withCooldown(authSubmit)();
+      throttledAuthSubmit();
     });
 
     document.querySelectorAll('.tab-icon').forEach(t => {
@@ -343,6 +354,8 @@
     document.getElementById('refresh-users').addEventListener('click', withCooldown(function(){ loaded.users = false; usersPage = 1; allUsers = []; allUsersLoaded = false; loadPublicUsersPage(1); }));
 
     document.getElementById('refresh-table').addEventListener('click', withCooldown(function(){ loaded.tables = false; loadTable(); }));
+    document.getElementById('add-row').addEventListener('click', withCooldown(addRow));
+    document.getElementById('delete-selected').addEventListener('click', withCooldown(deleteSelectedRows));
 
     document.getElementById('refresh-requests').addEventListener('click', withCooldown(function(){ loaded.requests = false; loadRegistrationRequests(); }));
 
@@ -607,33 +620,47 @@
 
   // ----- Table -----
   function loadTable(){
-    const wrap = document.getElementById('table-wrap');
-    wrap.innerHTML = '<div class="loading"><div class="spinner"></div><div>Загрузка...</div></div>';
+    const body = document.getElementById('table-body');
+    body.innerHTML = '<div class="loading"><div class="spinner"></div><div>Загрузка...</div></div>';
 
     const token = sessionStorage.getItem('sessionToken') || '';
-    if (!token) { wrap.innerHTML = '<div class="card">Требуется вход</div>'; return; }
+    if (!token) { body.innerHTML = '<div class="card">Требуется вход</div>'; return; }
 
     google.script.run
       .withSuccessHandler(res=>{
-        if (res && res.error) { wrap.innerHTML = '<div class="card">Ошибка: '+(res.error||'')+'</div>'; return; }
+        if (res && res.error) { body.innerHTML = '<div class="card">Ошибка: '+(res.error||'')+'</div>'; return; }
         cachedTable = res.data || [];
         tableSettings = res.settings || null;
         renderTable(cachedTable);
         loaded.tables = true;
       })
-      .withFailureHandler(()=> { wrap.innerHTML = '<div class="card">Ошибка загрузки</div>'; })
+      .withFailureHandler(()=> { body.innerHTML = '<div class="card">Ошибка загрузки</div>'; })
       .getTableDataWithToken(token); // доступно любому авторизованному пользователю
   }
 
   function renderTable(data){
-    const wrap = document.getElementById('table-wrap');
-    if (!data || data.length === 0) { wrap.innerHTML = '<div class="card">Данные не найдены</div>'; return; }
+    const body = document.getElementById('table-body');
+    if (!data || data.length === 0) { body.innerHTML = '<div class="card">Данные не найдены</div>'; return; }
     const table = document.createElement('table');
 
-    // Без отображения заголовка: показываем только редактируемые ячейки (tbody)
+    // Показываем все строки, включая первую
     const tbody = document.createElement('tbody');
-    for (let i=1;i<data.length;i++){
+    selectedRows = new Set();
+    for (let i=0;i<data.length;i++){
       const tr = document.createElement('tr');
+      // Выбор строки для удаления (только админ)
+      if (isAdmin) {
+        const selTd = document.createElement('td');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.addEventListener('change', function(){
+          if (this.checked) selectedRows.add(i); else selectedRows.delete(i);
+          const delBtn = document.getElementById('delete-selected');
+          delBtn.style.display = isAdmin && selectedRows.size > 0 ? 'inline-block' : 'none';
+        });
+        selTd.appendChild(cb);
+        tr.appendChild(selTd);
+      }
       for (let j=0;j<data[i].length;j++){
         const td = document.createElement('td'); td.textContent = data[i][j];
 
@@ -658,11 +685,14 @@
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
-    wrap.innerHTML = '';
-    wrap.appendChild(table);
+    body.innerHTML = '';
+    body.appendChild(table);
 
-    // сохранение только для админов
+    // сохранение и операции только для админов
     document.getElementById('save-table').style.display = isAdmin ? 'inline-block' : 'none';
+    document.getElementById('add-row').style.display = isAdmin ? 'inline-block' : 'none';
+    const delBtn = document.getElementById('delete-selected');
+    delBtn.style.display = isAdmin && selectedRows.size > 0 ? 'inline-block' : 'none';
     document.getElementById('save-table').onclick = withCooldown(saveTable);
   }
 
@@ -690,6 +720,29 @@
         .updateTableDataWithToken(token, tableSettings.sheetName, tableSettings.range, cachedTable);
     });
     disableDuring(btn, p);
+  }
+
+  function addRow(){
+    if (!isAdmin) return;
+    if (!cachedTable || !Array.isArray(cachedTable)) cachedTable = [];
+    const colCount = (cachedTable[0] && Array.isArray(cachedTable[0])) ? cachedTable[0].length : (tableSettings && Array.isArray(cachedTable[cachedTable.length-1]) ? cachedTable[cachedTable.length-1].length : 1);
+    const newRow = new Array(colCount).fill('');
+    cachedTable.push(newRow);
+    renderTable(cachedTable);
+    document.getElementById('save-table').style.display = 'inline-block';
+  }
+
+  function deleteSelectedRows(){
+    if (!isAdmin) return;
+    if (!selectedRows || selectedRows.size === 0) return;
+    // Удаляем строки начиная с конца, чтобы индексы не смещались
+    const toDelete = Array.from(selectedRows).sort((a,b)=>b-a);
+    for (const idx of toDelete) {
+      if (idx >= 0 && idx < cachedTable.length) cachedTable.splice(idx, 1);
+    }
+    selectedRows.clear();
+    renderTable(cachedTable);
+    document.getElementById('save-table').style.display = 'inline-block';
   }
 
   // ----- Profile -----
@@ -853,7 +906,7 @@
     table.className = 'log-table';
     const thead = document.createElement('thead');
     const thr = document.createElement('tr');
-    ['Timestamp','Actor','Action','Target','Details'].forEach(h => { 
+    ['Время','Автор','Действие','Объект','Подробности'].forEach(h => { 
       const th = document.createElement('th'); 
       th.textContent = h; 
       thr.appendChild(th); 

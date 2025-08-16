@@ -58,15 +58,18 @@ function getSettings() {
       USERS_SHEET_NAME: 'Пользователи',
       SETTINGS_SHEET_NAME: 'Настройки',
       REG_REQUESTS_SHEET_NAME: 'Заявки на регистрацию',
-      AUDIT_SHEET_NAME: 'Audit',
+      AUDIT_SHEET_NAME: 'Журнал',
       DATA_SHEET_NAME_PROPERTY: 'Лист',
       DATA_RANGE_PROPERTY: 'Диапазон'
     };
     SCRIPT_PROPERTIES.setProperties(settings);
   } else {
     if (!settings.REG_REQUESTS_SHEET_NAME) settings.REG_REQUESTS_SHEET_NAME = 'Заявки на регистрацию';
-    if (!settings.AUDIT_SHEET_NAME) settings.AUDIT_SHEET_NAME = 'Audit';
+    if (!settings.AUDIT_SHEET_NAME) settings.AUDIT_SHEET_NAME = 'Журнал';
     if (!settings.SETTINGS_SHEET_NAME) settings.SETTINGS_SHEET_NAME = 'Настройки';
+    if (!settings.USERS_SHEET_NAME) settings.USERS_SHEET_NAME = 'Пользователи';
+    if (!settings.DATA_SHEET_NAME_PROPERTY) settings.DATA_SHEET_NAME_PROPERTY = 'Лист';
+    if (!settings.DATA_RANGE_PROPERTY) settings.DATA_RANGE_PROPERTY = 'Диапазон';
   }
   return settings;
 }
@@ -103,11 +106,18 @@ function initSheetsOnce() {
     }
   }
 
-  // Audit
+  // Журнал (миграция старого названия)
   let audit = ss.getSheetByName(s.AUDIT_SHEET_NAME);
   if (!audit) {
-    audit = ss.insertSheet(s.AUDIT_SHEET_NAME);
-    audit.appendRow(['Timestamp', 'Actor', 'Action', 'Target', 'Details']);
+    const legacy = ss.getSheetByName('Audit');
+    if (legacy) {
+      legacy.setName(s.AUDIT_SHEET_NAME);
+      legacy.getRange(1,1,1,5).setValues([[ 'Время','Автор','Действие','Объект','Подробности' ]]);
+      audit = legacy;
+    } else {
+      audit = ss.insertSheet(s.AUDIT_SHEET_NAME);
+      audit.appendRow(['Время', 'Автор', 'Действие', 'Объект', 'Подробности']);
+    }
   }
 
   // Заявки
@@ -171,16 +181,13 @@ function ensureSheetsInitialized() {
 
 function getSheetHeaders(sheetName) {
   const cacheKey = 'headers_' + sheetName;
-  const cached = CACHE.get(cacheKey);
-  if (cached) {
-    try { return JSON.parse(cached); } catch (e) {}
-  }
+  // Игнорируем кеш при чтении, чтобы перестановка столбцов сразу учитывалась
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(sheetName);
   if (!sheet) return [];
   const lastCol = Math.max(1, sheet.getLastColumn() || 1);
   const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim());
-  CACHE.put(cacheKey, JSON.stringify(headers), HEADERS_CACHE_TTL);
+  try { CACHE.put(cacheKey, JSON.stringify(headers), HEADERS_CACHE_TTL); } catch (e) {}
   return headers;
 }
 
@@ -360,13 +367,7 @@ function logAudit(actor, action, target, details) {
   if (!isAllowedAuditAction(action)) return;
 
   try {
-    const s = getSettings();
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    let sheet = ss.getSheetByName(s.AUDIT_SHEET_NAME);
-    if (!sheet) {
-      sheet = ss.insertSheet(s.AUDIT_SHEET_NAME);
-      sheet.appendRow(['Timestamp', 'Actor', 'Action', 'Target', 'Details']);
-    }
+    const sheet = getOrMigrateAuditSheet();
     const lock = LockService.getScriptLock();
     lock.waitLock(5000);
     try {
@@ -701,7 +702,7 @@ function approveRegistrationRequest(token, requestRow) {
     userData.name = neutralizeFormulaCell(userData.name);
     userData.role = neutralizeFormulaCell(userData.role);
     userData.description = neutralizeFormulaCell(userData.description);
-    userData.password = neutralizeFormulaCell(userData.password);
+    // Пароль не нейтрализуем и не записываем в явном виде — он будет захеширован при добавлении
 
     const addResult = addNewUser(userData);
     if (!addResult.success) {
@@ -788,9 +789,7 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
     const rngRows = dataRange.getNumRows();
     const rngCols = dataRange.getNumColumns();
 
-    if (newData.length !== rngRows) {
-      return { success: false, error: `Несоответствие рядам. Ожидалось ${rngRows}, получено ${newData.length}` };
-    }
+    // Проверка по колонкам (строки могут отличаться для поддержки добавления/удаления)
     if (!newData.every(r => Array.isArray(r) && r.length === rngCols)) {
       return { success: false, error: `Несоответствие колонкам. Ожидалось по ${rngCols} значений в строках` };
     }
@@ -798,21 +797,23 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
     const headers = getSheetHeaders(sheetName);
     const colorHeaderIdx0 = findHeaderIndex(headers, ['Цвет','color','colour','цвет']);
     const colorColAbs1 = colorHeaderIdx0 >= 0 ? (colorHeaderIdx0 + 1) : -1;
+    const passwordHeaderIdx0 = findHeaderIndex(headers, ['Пароль','password']);
+    const passColAbs1 = passwordHeaderIdx0 >= 0 ? (passwordHeaderIdx0 + 1) : -1;
 
     const rangeStartRow1 = dataRange.getRow();
     const rangeStartCol1 = dataRange.getColumn();
     const sheetIsUsers = sheetName === s.USERS_SHEET_NAME;
 
-    // ВАЖНО: разрешаем редактировать первую строку диапазона (UI без заголовка)
+    // Разрешаем редактировать первую строку диапазона
     const protectFirstRowOfRange = false;
 
-    // Определяем, попадает ли "Цвет" внутрь диапазона и его относительный индекс
     const colorInRange = colorColAbs1 >= rangeStartCol1 && colorColAbs1 <= (rangeStartCol1 + rngCols - 1);
     const colorRelIdx = colorInRange ? (colorColAbs1 - rangeStartCol1) : -1;
+    const passInRange = passColAbs1 >= rangeStartCol1 && passColAbs1 <= (rangeStartCol1 + rngCols - 1);
+    const passRelIdx = passInRange ? (passColAbs1 - rangeStartCol1) : -1;
 
     const oldValues = dataRange.getValues();
 
-    // Подготовка к дифф-логированию
     const diffs = [];
     const maxDiffs = 100;
     const trunc = (v) => {
@@ -820,13 +821,12 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
       return sVal.length > 200 ? sVal.slice(0, 200) + '…' : sVal;
     };
 
-    // Нормализация/санитайз входных данных, защита первой строки ЛИСТА Users
     for (let i = 0; i < newData.length; i++) {
       const isHeaderOfRange = (protectFirstRowOfRange && i === 0);
       const isFirstRowOfUsers = (sheetIsUsers && (rangeStartRow1 + i) === 1);
 
       if (isHeaderOfRange || isFirstRowOfUsers) {
-        newData[i] = oldValues[i];
+        if (i < oldValues.length) newData[i] = oldValues[i];
         continue;
       }
 
@@ -840,20 +840,20 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
           row[j] = sanitizeString(row[j], MAX_CELL_LEN);
         }
       }
-      // Нормализация цвета
       if (colorRelIdx >= 0) {
         const norm = normalizeHexColor(row[colorRelIdx]);
         row[colorRelIdx] = norm || '#5865F2';
       }
     }
 
-    // Сбор диффов (по финальным значениям)
-    for (let i = 0; i < newData.length && diffs.length < maxDiffs; i++) {
+    const minRows = Math.min(newData.length, oldValues.length);
+    for (let i = 0; i < minRows && diffs.length < maxDiffs; i++) {
       const isHeaderOfRange = (protectFirstRowOfRange && i === 0);
       const isFirstRowOfUsers = (sheetIsUsers && (rangeStartRow1 + i) === 1);
       if (isHeaderOfRange || isFirstRowOfUsers) continue;
 
       for (let j = 0; j < newData[i].length && diffs.length < maxDiffs; j++) {
+        if (sheetIsUsers && passRelIdx >= 0 && j === passRelIdx) continue;
         const before = oldValues[i][j];
         const after = newData[i][j];
         if (before !== after) {
@@ -862,19 +862,36 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
         }
       }
     }
+    if (newData.length > oldValues.length) {
+      diffs.push(`added ${newData.length - oldValues.length} row(s)`);
+    } else if (newData.length < oldValues.length) {
+      diffs.push(`removed ${oldValues.length - newData.length} row(s)`);
+    }
 
     const lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
-      dataRange.setValues(newData);
+      const neededLastRow = rangeStartRow1 + newData.length - 1;
+      const maxRows = sheet.getMaxRows();
+      if (neededLastRow > maxRows) {
+        sheet.insertRowsAfter(maxRows, neededLastRow - maxRows);
+      }
+
+      const targetRange = sheet.getRange(rangeStartRow1, rangeStartCol1, newData.length, rngCols);
+      targetRange.setValues(newData);
+
+      const newA1 = targetRange.getA1Notation();
+      const settingsSheet = ss.getSheetByName(s.SETTINGS_SHEET_NAME);
+      if (settingsSheet) {
+        settingsSheet.getRange(2, 2).setValue(newA1);
+      }
     } finally {
       lock.releaseLock();
     }
 
-    // Сброс кэша заголовков затронутого листа
     CACHE.remove('headers_' + sheetName);
 
-    const details = diffs.length ? `changed ${diffs.length} cells:\n` + diffs.join('\n') : 'no-op';
+    const details = diffs.length ? `changed/resize details:\n` + diffs.slice(0, maxDiffs).join('\n') : 'no-op';
     logAudit(vt.email, 'update_table', `${sheetName}:${range}`, details);
     return { success: true, message: 'Данные таблицы обновлены' };
   } catch (e) {
@@ -897,6 +914,17 @@ function safeAppendRow(sheet, rowArr) {
   }
 }
 
+function buildColumnIndexMap(sheetName) {
+  const headers = getSheetHeaders(sheetName);
+  const map = {};
+  for (let i = 0; i < headers.length; i++) {
+    const h = String(headers[i] || '').trim();
+    if (!h) continue;
+    map[h] = i;
+  }
+  return { headers, map };
+}
+
 function addNewUser(userData) {
   ensureSheetsInitialized();
 
@@ -908,43 +936,40 @@ function addNewUser(userData) {
   const sheet = ss.getSheetByName(s.USERS_SHEET_NAME);
   if (!sheet) return { success: false, error: 'Лист "Пользователи" не найден' };
 
-  // Подготовка значений + нейтрализация формул
   const emojiSafe = truncateGraphemes(neutralizeFormulaCell(userData.emoji || '👤'), 8);
   const nameSafe = neutralizeFormulaCell(userData.name || '');
   const roleSafe = neutralizeFormulaCell(userData.role || '');
   const colorSafe = normalizeHexColor(userData.color || '#5865F2') || '#5865F2';
   const emailSafe = neutralizeFormulaCell(userData.email || '');
-  const passSafe  = neutralizeFormulaCell(userData.password || '');
+  const passPlain = String(userData.password || '');
   const descSafe  = neutralizeFormulaCell(userData.description || '');
   const isAdmin   = userData.isAdmin ? true : false;
 
-  // Проверка уникальности email под общим ScriptLock (исключаем гонки)
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    const headers = getSheetHeaders(s.USERS_SHEET_NAME);
-    const mailIdx = headers.indexOf('Почта');
-    if (mailIdx === -1) {
+    const { headers, map } = buildColumnIndexMap(s.USERS_SHEET_NAME);
+    const mailIdx = map['Почта'];
+    if (mailIdx == null || mailIdx === -1) {
       return { success: false, error: 'Лист "Пользователи" повреждён (нет колонки "Почта")' };
     }
-    const exists = readSheetDataRows(s.USERS_SHEET_NAME).some(r =>
-      String(r[mailIdx] || '').trim().toLowerCase() === String(emailSafe || '').trim().toLowerCase()
-    );
+    const rows = readSheetDataRows(s.USERS_SHEET_NAME);
+    const exists = rows.some(r => String(r[mailIdx] || '').trim().toLowerCase() === String(emailSafe || '').trim().toLowerCase());
     if (exists) return { success: false, error: 'Пользователь с такой почтой уже существует' };
 
-    const row = [
-      sanitizeString(emojiSafe, 8),
-      sanitizeString(nameSafe, 100),
-      sanitizeString(roleSafe, 50),
-      sanitizeString(colorSafe, 20),
-      sanitizeString(emailSafe, 200),
-      sanitizeString(passSafe, 200),
-      sanitizeString(descSafe, 1000),
-      isAdmin
-    ];
+    // Собираем строку по карте индексов, чтобы сохранять функциональность при перестановке столбцов
+    const row = new Array(headers.length).fill('');
+    if (map['Эмодзи'] != null) row[map['Эмодзи']] = sanitizeString(emojiSafe, 8);
+    if (map['Имя'] != null) row[map['Имя']] = sanitizeString(nameSafe, 100);
+    if (map['Роль'] != null) row[map['Роль']] = sanitizeString(roleSafe, 50);
+    if (map['Цвет'] != null) row[map['Цвет']] = sanitizeString(colorSafe, 20);
+    if (map['Почта'] != null) row[map['Почта']] = sanitizeString(emailSafe, 200);
+    if (map['Пароль'] != null) row[map['Пароль']] = sanitizeString(passPlain, 200);
+    if (map['Описание'] != null) row[map['Описание']] = sanitizeString(descSafe, 1000);
+    if (map['Админ'] != null) row[map['Админ']] = isAdmin;
 
     sheet.appendRow(row);
-    logAudit(emailSafe, 'add_user', emailSafe, 'user added'); // не попадёт в аудит (фильтр на запись), но оставляем вызов на будущее
+    logAudit(emailSafe, 'add_user', emailSafe, 'user added');
     return { success: true, message: 'Пользователь добавлен' };
   } catch (e) {
     return { success: false, error: e.message };
@@ -1010,10 +1035,7 @@ function getAuditLogsWithToken(token, page, pageSize) {
   page = Math.max(1, parseInt(page, 10) || 1);
   pageSize = Math.max(1, Math.min(500, parseInt(pageSize, 10) || 100));
 
-  const s = getSettings();
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(s.AUDIT_SHEET_NAME);
-  if (!sheet) return { logs: [], total: 0, page: page, pageSize: pageSize };
+  const sheet = getOrMigrateAuditSheet();
 
   const lastRow = sheet.getLastRow(); // с заголовком
   const total = Math.max(0, lastRow - 1);
@@ -1064,4 +1086,23 @@ function getSessionInfo(token) {
   const vt = validateSessionToken(token);
   if (!vt.valid) return { valid: false };
   return { valid: true, email: vt.email, isAdmin: vt.isAdmin };
+}
+
+/* ----------------------------
+   Audit helpers (Русские листы/столбцы)
+   ---------------------------- */
+function getOrMigrateAuditSheet() {
+  const s = getSettings();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(s.AUDIT_SHEET_NAME);
+  if (sheet) return sheet;
+  const legacy = ss.getSheetByName('Audit');
+  if (legacy) {
+    legacy.setName(s.AUDIT_SHEET_NAME);
+    legacy.getRange(1, 1, 1, 5).setValues([[ 'Время', 'Автор', 'Действие', 'Объект', 'Подробности' ]]);
+    return legacy;
+  }
+  sheet = ss.insertSheet(s.AUDIT_SHEET_NAME);
+  sheet.appendRow(['Время', 'Автор', 'Действие', 'Объект', 'Подробности']);
+  return sheet;
 }
