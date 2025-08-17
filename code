@@ -932,18 +932,29 @@ function addNewUser(userData) {
     );
     if (exists) return { success: false, error: 'Пользователь с такой почтой уже существует' };
 
-    const row = [
-      sanitizeString(emojiSafe, 8),
-      sanitizeString(nameSafe, 100),
-      sanitizeString(roleSafe, 50),
-      sanitizeString(colorSafe, 20),
-      sanitizeString(emailSafe, 200),
-      sanitizeString(passSafe, 200),
-      sanitizeString(descSafe, 1000),
-      isAdmin
-    ];
+    const headersW = getSheetHeaders(s.USERS_SHEET_NAME);
+    const lastColW = Math.max(1, sheet.getLastColumn() || (headersW.length || 1));
+    const newRowArr = new Array(lastColW).fill('');
 
-    sheet.appendRow(row);
+    const idxEmoji = findHeaderIndex(headersW, ['Эмодзи','emoji','emojis']);
+    const idxName  = findHeaderIndex(headersW, ['Имя','name']);
+    const idxRole  = findHeaderIndex(headersW, ['Роль','role']);
+    const idxColor = findHeaderIndex(headersW, ['Цвет','color','colour','цвет']);
+    const idxMail  = findHeaderIndex(headersW, ['Почта','email','e-mail','mail']);
+    const idxPass  = findHeaderIndex(headersW, ['Пароль','password']);
+    const idxDesc  = findHeaderIndex(headersW, ['Описание','description','desc']);
+    const idxAdmin = headersW.indexOf('Админ');
+
+    if (idxEmoji !== -1) newRowArr[idxEmoji] = sanitizeString(emojiSafe, 8);
+    if (idxName  !== -1) newRowArr[idxName]  = sanitizeString(nameSafe, 100);
+    if (idxRole  !== -1) newRowArr[idxRole]  = sanitizeString(roleSafe, 50);
+    if (idxColor !== -1) newRowArr[idxColor] = sanitizeString(colorSafe, 20);
+    if (idxMail  !== -1) newRowArr[idxMail]  = sanitizeString(emailSafe, 200);
+    if (idxPass  !== -1) newRowArr[idxPass]  = sanitizeString(passSafe, 200);
+    if (idxDesc  !== -1) newRowArr[idxDesc]  = sanitizeString(descSafe, 1000);
+    if (idxAdmin !== -1) newRowArr[idxAdmin] = isAdmin;
+
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, lastColW).setValues([newRowArr]);
     logAudit(emailSafe, 'add_user', emailSafe, 'user added'); // не попадёт в аудит (фильтр на запись), но оставляем вызов на будущее
     return { success: true, message: 'Пользователь добавлен' };
   } catch (e) {
@@ -1000,7 +1011,7 @@ function getUserByEmail(pochta) {
  * Возвращает объект: { logs: [ {Timestamp, Actor, Action, Target, Details} ], total, page, pageSize }
  * Возвращаем ТОЛЬКО события, которые пишутся (update_table / approve / reject).
  * Пагинация БЕЗ чтения всего листа (по окну).
- * Упрощение отображения Details: возвращаем в поле Details только название действия (Action).
+ * Детали: возвращаем полное поле Details с описанием изменений (до/после).
  */
 function getAuditLogsWithToken(token, page, pageSize) {
   ensureSheetsInitialized();
@@ -1029,13 +1040,13 @@ function getAuditLogsWithToken(token, page, pageSize) {
   const startRow = 2 + startIdx; // пропускаем заголовок
   const rows = sheet.getRange(startRow, 1, readRows, lastCol).getValues();
 
-  // ВАЖНО: Details упрощаем до названия действия (Action)
+  // Details: возвращаем полные подробности изменений
   const logs = rows.map(r => ({
     Timestamp: r[0] || '',
     Actor:     r[1] || '',
     Action:    r[2] || '',
     Target:    r[3] || '',
-    Details:   (r[2] || '') // вместо r[4]
+    Details:   (r[4] || '')
   }));
 
   return { logs, total, page, pageSize };

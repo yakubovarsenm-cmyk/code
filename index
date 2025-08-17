@@ -130,7 +130,7 @@
   <!-- Users -->
   <section id="section-users">
     <h2 class="section-title">Пользователи</h2>
-    <p class="section-desc">Список участников системы</p>
+    <p class="section-desc">Список участников системы — Всего: <span id="users-count">0</span></p>
 
     <div class="controls">
       <input id="search" type="text" placeholder="Поиск по имени..." />
@@ -494,6 +494,7 @@
       .withSuccessHandler(res=>{
         if (!res) { grid.innerHTML = '<div class="card">Ошибка загрузки</div>'; return; }
         usersTotal = res.total || usersTotal;
+        const countEl = document.getElementById('users-count'); if (countEl) countEl.textContent = String(usersTotal);
         if (page === 1) {
           allUsers = res.users || [];
         } else {
@@ -522,6 +523,7 @@
     const sel = document.getElementById('role-filter');
     sel.innerHTML = '<option value="">Все роли</option>';
     allRoles.forEach(r=>{ const opt = document.createElement('option'); opt.value = r; opt.textContent = r; sel.appendChild(opt); });
+    const cnt = document.getElementById('users-count'); if (cnt) cnt.textContent = String(usersTotal || users.length || 0);
   }
 
   function searchUsers(){
@@ -632,8 +634,19 @@
 
     // Без отображения заголовка: показываем только редактируемые ячейки (tbody)
     const tbody = document.createElement('tbody');
-    for (let i=1;i<data.length;i++){
+    for (let i=0;i<data.length;i++){
       const tr = document.createElement('tr');
+      if (isAdmin) {
+        const actions = document.createElement('td'); actions.className = 'row-actions';
+        const makeBtn = function(label, title, handler){ const b = document.createElement('button'); b.className='small-btn'; b.textContent=label; b.title=title; b.addEventListener('click', withCooldown(function(e){ e.preventDefault(); e.stopPropagation(); handler(); })); return b; };
+        const rowIndex = i;
+        actions.appendChild(makeBtn('↑','Переместить вверх', function(){ if (rowIndex <= 0) return; const tmp = cachedTable[rowIndex - 1]; cachedTable[rowIndex - 1] = cachedTable[rowIndex]; cachedTable[rowIndex] = tmp; document.getElementById('save-table').style.display = 'inline-block'; renderTable(cachedTable); }));
+        actions.appendChild(makeBtn('↓','Переместить вниз', function(){ if (rowIndex >= cachedTable.length - 1) return; const tmp = cachedTable[rowIndex + 1]; cachedTable[rowIndex + 1] = cachedTable[rowIndex]; cachedTable[rowIndex] = tmp; document.getElementById('save-table').style.display = 'inline-block'; renderTable(cachedTable); }));
+        actions.appendChild(makeBtn('📋','Копировать строку', function(){ const txt = (cachedTable[rowIndex] || []).join('\t'); if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(txt).then(function(){ showToast('Скопировано',1000); }).catch(function(){ fallbackCopy(txt); }); } else { fallbackCopy(txt); } }));
+        actions.appendChild(makeBtn('🧹','Очистить строку', function(){ if (!cachedTable[rowIndex]) return; for (let c=0;c<cachedTable[rowIndex].length;c++){ cachedTable[rowIndex][c]=''; } document.getElementById('save-table').style.display = 'inline-block'; renderTable(cachedTable); }));
+        tr.appendChild(actions);
+        function fallbackCopy(text){ const ta=document.createElement('textarea'); ta.value=text; document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); showToast('Скопировано',1000);}catch(e){ showToast('Не удалось скопировать',1500);} document.body.removeChild(ta); }
+      }
       for (let j=0;j<data[i].length;j++){
         const td = document.createElement('td'); td.textContent = data[i][j];
 
@@ -868,7 +881,7 @@
       const tdActor = document.createElement('td'); tdActor.textContent = r.Actor || ''; tr.appendChild(tdActor);
       const tdAction = document.createElement('td'); tdAction.textContent = r.Action || ''; tr.appendChild(tdAction);
       const tdTarget = document.createElement('td'); tdTarget.textContent = r.Target || ''; tr.appendChild(tdTarget);
-      const tdDetails = document.createElement('td'); tdDetails.textContent = r.Details || ''; tr.appendChild(tdDetails);
+      const tdDetails = document.createElement('td'); tdDetails.textContent = r.Details || ''; tdDetails.style.whiteSpace = 'pre-wrap'; tr.appendChild(tdDetails);
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
