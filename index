@@ -636,6 +636,17 @@
     const tbody = document.createElement('tbody');
     for (let i=0;i<data.length;i++){
       const tr = document.createElement('tr');
+      if (isAdmin) {
+        const actions = document.createElement('td'); actions.className = 'row-actions';
+        const makeBtn = function(label, title, handler){ const b = document.createElement('button'); b.className='small-btn'; b.textContent=label; b.title=title; b.addEventListener('click', withCooldown(function(e){ e.preventDefault(); e.stopPropagation(); handler(); })); return b; };
+        const rowIndex = i;
+        actions.appendChild(makeBtn('↑','Переместить вверх', function(){ if (rowIndex <= 0) return; const tmp = cachedTable[rowIndex - 1]; cachedTable[rowIndex - 1] = cachedTable[rowIndex]; cachedTable[rowIndex] = tmp; document.getElementById('save-table').style.display = 'inline-block'; renderTable(cachedTable); }));
+        actions.appendChild(makeBtn('↓','Переместить вниз', function(){ if (rowIndex >= cachedTable.length - 1) return; const tmp = cachedTable[rowIndex + 1]; cachedTable[rowIndex + 1] = cachedTable[rowIndex]; cachedTable[rowIndex] = tmp; document.getElementById('save-table').style.display = 'inline-block'; renderTable(cachedTable); }));
+        actions.appendChild(makeBtn('📋','Копировать строку', function(){ const txt = (cachedTable[rowIndex] || []).join('\t'); if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(txt).then(function(){ showToast('Скопировано',1000); }).catch(function(){ fallbackCopy(txt); }); } else { fallbackCopy(txt); } }));
+        actions.appendChild(makeBtn('🧹','Очистить строку', function(){ if (!cachedTable[rowIndex]) return; for (let c=0;c<cachedTable[rowIndex].length;c++){ cachedTable[rowIndex][c]=''; } document.getElementById('save-table').style.display = 'inline-block'; renderTable(cachedTable); }));
+        tr.appendChild(actions);
+        function fallbackCopy(text){ const ta=document.createElement('textarea'); ta.value=text; document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); showToast('Скопировано',1000);}catch(e){ showToast('Не удалось скопировать',1500);} document.body.removeChild(ta); }
+      }
       for (let j=0;j<data[i].length;j++){
         const td = document.createElement('td'); td.textContent = data[i][j];
 
