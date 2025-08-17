@@ -1,24 +1,13 @@
 /**
  * Code.gs — Серверная часть (Google Apps Script)
  *
- * Исправления и функционал:
- * - Надёжная getTableData() — обработка ошибок диапазона
- * - Session token auth (createSessionToken / validateSessionToken / logout / invalidateAllSessionsForUser)
- * - Эндпоинт чтения таблицы по токену: getTableDataWithToken (любой авторизованный пользователь)
- * - Админ-эндпоинты: approve/reject/updateTableDataWithToken/getAuditLogsWithToken (проверка токена)
- * - Audit log в листе "Audit" + пагинация БЕЗ полной выборки (пишем только разрешённые события)
- * - СЕРВЕРНЫЙ ФИЛЬТР ЛОГОВ: пишем и возвращаем только действия update_table / approve / reject
- * - Серверная валидация входных данных и sanitize + нейтрализация формул (=, +, -, @)
- * - Rate-limiting через CacheService: per-email + глобальный счётчик
- * - Кэш заголовков
- * - Проверка уникальности email при добавлении пользователя под ScriptLock (без гонок)
- * - В updateTableDataWithToken запрет формул и нормализация колонки "Цвет", сброс кэша заголовков
- * - Детальные логи правок: "Как было" → "Как стало" с A1-адресами (логируются, т.к. это update_table)
- * - Цвет роли: робастное чтение из колонки "Цвет" + резерв по фону ячейки
- * - Защита заголовков: НЕ перезаписываем первую строку листа (Users), но разрешаем редактировать первую строку диапазона
- * - Эмодзи обрезаются по графемам (не ломаем суррогатные пары)
- * - Больше не отдаем пароль в getRegistrationRequests
- * - findOrNormalizeRequestsSheet больше не переименовывает листы автоматически — только находит/создаёт
+ * Изменения в этом релизе:
+ * - Закрыты публичные серверные эндпоинты: getTableData, getRegistrationRequests, getUserByEmail
+ * - Добавлены защищённые токеном эндпоинты: getRegistrationRequestsWithToken, getUserByEmailWithToken
+ * - getTableData вынесен в приватный _getTableDataInternal и доступен только через getTableDataWithToken
+ * - Сравнение email сделано регистронезависимым в checkAuth и validateSession
+ * - Фильтрация событий на чтении аудита (isAllowedAuditAction)
+ * - Мелкие улучшения стабильности и консистентности
  */
 
 const SCRIPT_PROPERTIES = PropertiesService.getScriptProperties();
@@ -261,7 +250,7 @@ function createSessionToken(email) {
   const createdKey = 'session_created_' + token;
   const nowTs = Date.now().toString();
   try {
-    CACHE.put(sessionKey, String(email), SESSION_TTL_SECONDS);
+    CACHE.put(sessionKey, String(email).trim().toLowerCase(), SESSION_TTL_SECONDS);
     CACHE.put(createdKey, nowTs, SESSION_TTL_SECONDS);
   } catch (e) {
     console.error('createSessionToken cache error: ' + e.message);
@@ -339,7 +328,7 @@ function logout(token) {
 
 function invalidateAllSessionsForUser(email) {
   if (!email || !isValidEmail(email)) return { success: false, error: 'Неверный email' };
-  const key = 'sessions_killed_' + String(email);
+  const key = 'sessions_killed_' + String(email).trim().toLowerCase();
   const now = Date.now().toString();
   try {
     SCRIPT_PROPERTIES.setProperty(key, now);
@@ -385,17 +374,17 @@ function logAudit(actor, action, target, details) {
    ---------------------------- */
 
 function isAuthBlocked(email) {
-  const key = 'auth_attempts_' + String(email);
+  const key = 'auth_attempts_' + String(email).trim().toLowerCase();
   const attempts = parseInt(CACHE.get(key) || '0', 10) || 0;
   return attempts >= AUTH_ATTEMPT_LIMIT;
 }
 function recordAuthFailure(email) {
-  const key = 'auth_attempts_' + String(email);
+  const key = 'auth_attempts_' + String(email).trim().toLowerCase();
   const attempts = parseInt(CACHE.get(key) || '0', 10) || 0;
   CACHE.put(key, (attempts + 1).toString(), AUTH_ATTEMPT_TTL);
 }
 function clearAuthFailures(email) {
-  const key = 'auth_attempts_' + String(email);
+  const key = 'auth_attempts_' + String(email).trim().toLowerCase();
   try { CACHE.remove(key); } catch (e) {}
 }
 
@@ -446,24 +435,25 @@ function checkAuth(pochta, password) {
   }
 
   const rows = readSheetDataRows(s.USERS_SHEET_NAME);
+  const inputMail = String(pochta).trim().toLowerCase();
+
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-
-    const mail = String(row[mailIdx] || '').trim();
-    if (mail === String(pochta).trim()) {
+    const mail = String(row[mailIdx] || '').trim().toLowerCase();
+    if (mail === inputMail) {
       const stored = String(row[passIdx] || '');
       if (stored === String(password)) {
         clearAuthFailures(pochta);
         const isAdm = adminIdx !== -1 ? cellToBool(row[adminIdx]) : false;
-        const token = createSessionToken(pochta);
+        const token = createSessionToken(inputMail);
         const userName = nameIdx !== -1 ? row[nameIdx] : '';
         const userRole = roleIdx !== -1 ? row[roleIdx] : '';
-        logAudit(pochta, 'login_success', '', 'login OK');
+        logAudit(inputMail, 'login_success', '', 'login OK');
         return { authorized: true, userName: userName, userRole: userRole, isAdmin: isAdm, token: token };
       } else {
         recordAuthFailure(pochta);
         recordAuthGlobalFailure();
-        logAudit(pochta, 'login_failed', '', 'invalid password');
+        logAudit(inputMail, 'login_failed', '', 'invalid password');
         return { authorized: false, error: 'Неверная почта или пароль' };
       }
     }
@@ -471,7 +461,7 @@ function checkAuth(pochta, password) {
 
   recordAuthFailure(pochta);
   recordAuthGlobalFailure();
-  logAudit(pochta, 'login_failed', '', 'email not found');
+  logAudit(inputMail, 'login_failed', '', 'email not found');
   return { authorized: false, error: 'Неверная почта или пароль' };
 }
 
@@ -490,9 +480,11 @@ function validateSession(pochta) {
   if (mailIdx === -1) return { valid: false, isAdmin: false };
 
   const rows = readSheetDataRows(s.USERS_SHEET_NAME);
+  const inputMail = String(pochta).trim().toLowerCase();
+
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (String(row[mailIdx] || '').trim() === String(pochta).trim()) {
+    if (String(row[mailIdx] || '').trim().toLowerCase() === inputMail) {
       return { valid: true, isAdmin: adminIdx !== -1 ? cellToBool(row[adminIdx]) : false };
     }
   }
@@ -566,11 +558,10 @@ function getPublicUserDataPage(page, pageSize) {
 }
 
 /* ----------------------------
-   Robust getTableData (fix spinner issue) + tokenized reader
+   Robust getTableData (private) + tokenized reader
    ---------------------------- */
 
-function getTableData() {
-  ensureSheetsInitialized();
+function _getTableDataInternal() {
   const s = getSettings();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const settingsSheet = ss.getSheetByName(s.SETTINGS_SHEET_NAME);
@@ -578,7 +569,6 @@ function getTableData() {
     return { error: 'Лист "Настройки" не найден' };
   }
 
-  // read second row columns A and B (sheet name and range)
   try {
     const vals = settingsSheet.getRange(2, 1, 1, 2).getValues();
     if (!vals || !vals[0]) {
@@ -608,39 +598,50 @@ function getTableData() {
   }
 }
 
+// Старый публичный ридер закрыт
+function getTableData() {
+  return { error: 'Не авторизовано' };
+}
+
 // Новый эндпоинт: только для авторизованных (не требуется быть админом)
 function getTableDataWithToken(token) {
   ensureSheetsInitialized();
   const vt = validateSessionToken(token);
   if (!vt.valid) return { error: 'Не авторизовано' };
-  return getTableData();
+  return _getTableDataInternal();
 }
 
 /* ----------------------------
    Registration requests & admin actions
    ---------------------------- */
 
+// Старый публичный вызов закрыт
 function getRegistrationRequests() {
+  return { error: 'Не авторизовано' };
+}
+
+// Новый защищённый вызов
+function getRegistrationRequestsWithToken(token) {
   ensureSheetsInitialized();
-  const s = getSettings();
+  const vt = validateSessionToken(token);
+  if (!vt.valid || !vt.isAdmin) return { error: 'Не авторизовано' };
+
   const sheet = findOrNormalizeRequestsSheet();
-  if (!sheet) return [];
-  const headers = getSheetHeaders(sheet.getName()); // используем реальное имя(если лист найден по шаблону)
+  if (!sheet) return { error: 'Лист заявок не найден' };
+
+  const headers = getSheetHeaders(sheet.getName());
   const emojiIdx = headers.indexOf('Эмодзи');
   const nameIdx = headers.indexOf('Имя');
   const roleIdx = headers.indexOf('Роль');
   const colorIdx = headers.indexOf('Цвет');
   const mailIdx = headers.indexOf('Почта');
-  // const passIdx = headers.indexOf('Пароль'); // не возвращаем на клиент
   const descIdx = headers.indexOf('Описание');
   const adminIdx = headers.indexOf('Админ');
 
-  const rows = (function() {
-    const lastRow = sheet.getLastRow();
-    if (lastRow < 2) return [];
-    const lastCol = Math.max(1, sheet.getLastColumn() || 1);
-    return sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
-  })();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { requests: [] };
+  const lastCol = Math.max(1, sheet.getLastColumn() || 1);
+  const rows = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
 
   const requests = [];
   for (let i = 0; i < rows.length; i++) {
@@ -652,12 +653,11 @@ function getRegistrationRequests() {
       role: roleIdx !== -1 ? row[roleIdx] : '',
       color: colorIdx !== -1 ? row[colorIdx] : '#5865F2',
       email: mailIdx !== -1 ? row[mailIdx] : '',
-      // password: НЕ возвращаем
       description: descIdx !== -1 ? row[descIdx] : '',
       isAdmin: adminIdx !== -1 ? cellToBool(row[adminIdx]) : false
     });
   }
-  return requests;
+  return { requests };
 }
 
 function approveRegistrationRequest(token, requestRow) {
@@ -671,8 +671,6 @@ function approveRegistrationRequest(token, requestRow) {
   requestRow = parseInt(requestRow, 10);
   if (!requestRow || requestRow < 2) return { success: false, error: 'Неверный номер строки' };
 
-  const s = getSettings();
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
   const reqSheet = findOrNormalizeRequestsSheet();
   if (!reqSheet) return { success: false, error: 'Лист заявок не найден' };
 
@@ -696,7 +694,7 @@ function approveRegistrationRequest(token, requestRow) {
       return { success: false, error: 'Неверный email в заявке' };
     }
 
-    // Нейтрализуем потенциальные формулы в текстовых полях перед добавлением
+    // Нейтрализуем потенциальные формулы
     userData.emoji = truncateGraphemes(neutralizeFormulaCell(userData.emoji), 8);
     userData.name = neutralizeFormulaCell(userData.name);
     userData.role = neutralizeFormulaCell(userData.role);
@@ -736,8 +734,6 @@ function rejectRegistrationRequest(token, requestRow) {
   requestRow = parseInt(requestRow, 10);
   if (!requestRow || requestRow < 2) return { success: false, error: 'Неверный номер строки' };
 
-  const s = getSettings();
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
   const reqSheet = findOrNormalizeRequestsSheet();
   if (!reqSheet) return { success: false, error: 'Лист заявок не найден' };
 
@@ -803,16 +799,14 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
     const rangeStartCol1 = dataRange.getColumn();
     const sheetIsUsers = sheetName === s.USERS_SHEET_NAME;
 
-    // ВАЖНО: разрешаем редактировать первую строку диапазона (UI без заголовка)
+    // Разрешаем редактировать первую строку диапазона (UI без заголовка)
     const protectFirstRowOfRange = false;
 
-    // Определяем, попадает ли "Цвет" внутрь диапазона и его относительный индекс
     const colorInRange = colorColAbs1 >= rangeStartCol1 && colorColAbs1 <= (rangeStartCol1 + rngCols - 1);
     const colorRelIdx = colorInRange ? (colorColAbs1 - rangeStartCol1) : -1;
 
     const oldValues = dataRange.getValues();
 
-    // Подготовка к дифф-логированию
     const diffs = [];
     const maxDiffs = 100;
     const trunc = (v) => {
@@ -847,7 +841,7 @@ function updateTableDataWithToken(token, sheetName, range, newData) {
       }
     }
 
-    // Сбор диффов (по финальным значениям)
+    // Сбор диффов
     for (let i = 0; i < newData.length && diffs.length < maxDiffs; i++) {
       const isHeaderOfRange = (protectFirstRowOfRange && i === 0);
       const isFirstRowOfUsers = (sheetIsUsers && (rangeStartRow1 + i) === 1);
@@ -913,7 +907,7 @@ function addNewUser(userData) {
   const nameSafe = neutralizeFormulaCell(userData.name || '');
   const roleSafe = neutralizeFormulaCell(userData.role || '');
   const colorSafe = normalizeHexColor(userData.color || '#5865F2') || '#5865F2';
-  const emailSafe = neutralizeFormulaCell(userData.email || '');
+  const emailSafe = neutralizeFormulaCell(String(userData.email || '').trim().toLowerCase());
   const passSafe  = neutralizeFormulaCell(userData.password || '');
   const descSafe  = neutralizeFormulaCell(userData.description || '');
   const isAdmin   = userData.isAdmin ? true : false;
@@ -927,6 +921,7 @@ function addNewUser(userData) {
     if (mailIdx === -1) {
       return { success: false, error: 'Лист "Пользователи" повреждён (нет колонки "Почта")' };
     }
+
     const exists = readSheetDataRows(s.USERS_SHEET_NAME).some(r =>
       String(r[mailIdx] || '').trim().toLowerCase() === String(emailSafe || '').trim().toLowerCase()
     );
@@ -944,7 +939,7 @@ function addNewUser(userData) {
     ];
 
     sheet.appendRow(row);
-    logAudit(emailSafe, 'add_user', emailSafe, 'user added'); // не попадёт в аудит (фильтр на запись), но оставляем вызов на будущее
+    logAudit(emailSafe, 'add_user', emailSafe, 'user added'); // не попадёт в аудит (фильтр записи), на будущее
     return { success: true, message: 'Пользователь добавлен' };
   } catch (e) {
     return { success: false, error: e.message };
@@ -954,12 +949,24 @@ function addNewUser(userData) {
 }
 
 /* ----------------------------
-   User retrieval
+   User retrieval (secured)
    ---------------------------- */
 
+// Закрываем старый публичный вызов
 function getUserByEmail(pochta) {
+  return null;
+}
+
+// Новый защищённый вызов: не-админу — только свой профиль
+function getUserByEmailWithToken(token, pochta) {
   ensureSheetsInitialized();
-  if (!pochta) return null;
+  const vt = validateSessionToken(token);
+  if (!vt.valid) return null;
+
+  const requested = String(pochta || '').trim().toLowerCase();
+  const caller = String(vt.email || '').trim().toLowerCase();
+
+  if (!vt.isAdmin && requested !== caller) return null;
 
   const s = getSettings();
   const headers = getSheetHeaders(s.USERS_SHEET_NAME);
@@ -976,12 +983,12 @@ function getUserByEmail(pochta) {
   const rows = readSheetDataRows(s.USERS_SHEET_NAME);
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (String(row[mailIdx] || '').trim() === String(pochta).trim()) {
+    if (String(row[mailIdx] || '').trim().toLowerCase() === requested) {
       return {
         emoji: emojiIdx !== -1 ? (row[emojiIdx] || '👤') : '👤',
         name: nameIdx !== -1 ? (row[nameIdx] || '') : '',
         role: roleIdx !== -1 ? (row[roleIdx] || '') : '',
-        color: (function(v) { return normalizeHexColor(v) || '#5865F2'; })(colorIdx !== -1 ? row[colorIdx] : ''),
+        color: normalizeHexColor(colorIdx !== -1 ? row[colorIdx] : '') || '#5865F2',
         email: row[mailIdx] || '',
         description: descIdx !== -1 ? (row[descIdx] || '') : '',
         isAdmin: adminIdx !== -1 ? cellToBool(row[adminIdx]) : false
@@ -992,16 +999,9 @@ function getUserByEmail(pochta) {
 }
 
 /* ----------------------------
-   Audit logs endpoint (admin-protected)
+   Audit logs endpoint (admin-protected) — server-side filter
    ---------------------------- */
 
-/**
- * getAuditLogsWithToken(token, page, pageSize)
- * Возвращает объект: { logs: [ {Timestamp, Actor, Action, Target, Details} ], total, page, pageSize }
- * Возвращаем ТОЛЬКО события, которые пишутся (update_table / approve / reject).
- * Пагинация БЕЗ чтения всего листа (по окну).
- * Упрощение отображения Details: возвращаем в поле Details только название действия (Action).
- */
 function getAuditLogsWithToken(token, page, pageSize) {
   ensureSheetsInitialized();
   const vt = validateSessionToken(token);
@@ -1013,32 +1013,34 @@ function getAuditLogsWithToken(token, page, pageSize) {
   const s = getSettings();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(s.AUDIT_SHEET_NAME);
-  if (!sheet) return { logs: [], total: 0, page: page, pageSize: pageSize };
+  if (!sheet) return { logs: [], total: 0, page, pageSize };
 
   const lastRow = sheet.getLastRow(); // с заголовком
-  const total = Math.max(0, lastRow - 1);
-  if (total === 0) return { logs: [], total: 0, page: page, pageSize: pageSize };
+  const totalRows = Math.max(0, lastRow - 1);
+  if (totalRows === 0) return { logs: [], total: 0, page, pageSize };
 
   const lastCol = Math.max(5, sheet.getLastColumn() || 5);
 
-  // Старые записи первыми (как и ранее):
-  const startIdx = (page - 1) * pageSize;          // 0-based
-  const readRows = Math.min(pageSize, total - startIdx);
-  if (readRows <= 0) return { logs: [], total, page, pageSize };
+  const startIdx = (page - 1) * pageSize;  // 0-based
+  const readRows = Math.min(pageSize, totalRows - startIdx);
+  if (readRows <= 0) return { logs: [], total: totalRows, page, pageSize };
 
   const startRow = 2 + startIdx; // пропускаем заголовок
   const rows = sheet.getRange(startRow, 1, readRows, lastCol).getValues();
 
-  // ВАЖНО: Details упрощаем до названия действия (Action)
-  const logs = rows.map(r => ({
+  // Фильтруем только разрешённые действия
+  const filtered = rows.filter(r => isAllowedAuditAction(r[2]));
+  const logs = filtered.map(r => ({
     Timestamp: r[0] || '',
     Actor:     r[1] || '',
     Action:    r[2] || '',
     Target:    r[3] || '',
-    Details:   (r[2] || '') // вместо r[4]
+    // По умолчанию упрощаем details до Action; можно вернуть r[4] для подробностей
+    Details:   r[2] || ''
   }));
 
-  return { logs, total, page, pageSize };
+  // total оставляем как общее число строк (без затрат на полную фильтрацию)
+  return { logs, total: totalRows, page, pageSize };
 }
 
 /* ----------------------------
@@ -1064,4 +1066,25 @@ function getSessionInfo(token) {
   const vt = validateSessionToken(token);
   if (!vt.valid) return { valid: false };
   return { valid: true, email: vt.email, isAdmin: vt.isAdmin };
+}
+
+// Новый метод: чтение указанной таблицы по имени листа и диапазону
+function getNamedTableDataWithToken(token, sheetName, range) {
+  ensureSheetsInitialized();
+  const vt = validateSessionToken(token);
+  if (!vt.valid) return { error: 'Не авторизовано' };
+
+  if (!sheetName || !range) return { error: 'Не заданы имя листа или диапазон' };
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return { error: `Лист "${sheetName}" не найден` };
+
+  try {
+    const rng = sheet.getRange(range);
+    const values = rng.getValues();
+    return { data: values, settings: { sheetName, range } };
+  } catch (e) {
+    return { error: `Ошибка диапазона "${range}": ${e.message}` };
+  }
 }
