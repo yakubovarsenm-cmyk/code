@@ -1000,7 +1000,7 @@ function getUserByEmail(pochta) {
  * Возвращает объект: { logs: [ {Timestamp, Actor, Action, Target, Details} ], total, page, pageSize }
  * Возвращаем ТОЛЬКО события, которые пишутся (update_table / approve / reject).
  * Пагинация БЕЗ чтения всего листа (по окну).
- * Упрощение отображения Details: возвращаем в поле Details только название действия (Action).
+ * Детали: возвращаем полное поле Details с описанием изменений (до/после).
  */
 function getAuditLogsWithToken(token, page, pageSize) {
   ensureSheetsInitialized();
@@ -1029,13 +1029,13 @@ function getAuditLogsWithToken(token, page, pageSize) {
   const startRow = 2 + startIdx; // пропускаем заголовок
   const rows = sheet.getRange(startRow, 1, readRows, lastCol).getValues();
 
-  // ВАЖНО: Details упрощаем до названия действия (Action)
+  // Details: возвращаем полные подробности изменений
   const logs = rows.map(r => ({
     Timestamp: r[0] || '',
     Actor:     r[1] || '',
     Action:    r[2] || '',
     Target:    r[3] || '',
-    Details:   (r[2] || '') // вместо r[4]
+    Details:   (r[4] || '')
   }));
 
   return { logs, total, page, pageSize };

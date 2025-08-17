@@ -632,7 +632,7 @@
 
     // Без отображения заголовка: показываем только редактируемые ячейки (tbody)
     const tbody = document.createElement('tbody');
-    for (let i=1;i<data.length;i++){
+    for (let i=0;i<data.length;i++){
       const tr = document.createElement('tr');
       for (let j=0;j<data[i].length;j++){
         const td = document.createElement('td'); td.textContent = data[i][j];
@@ -868,7 +868,7 @@
       const tdActor = document.createElement('td'); tdActor.textContent = r.Actor || ''; tr.appendChild(tdActor);
       const tdAction = document.createElement('td'); tdAction.textContent = r.Action || ''; tr.appendChild(tdAction);
       const tdTarget = document.createElement('td'); tdTarget.textContent = r.Target || ''; tr.appendChild(tdTarget);
-      const tdDetails = document.createElement('td'); tdDetails.textContent = r.Details || ''; tr.appendChild(tdDetails);
+      const tdDetails = document.createElement('td'); tdDetails.textContent = r.Details || ''; tdDetails.style.whiteSpace = 'pre-wrap'; tr.appendChild(tdDetails);
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
