@@ -61,6 +61,24 @@
   .toast{position:fixed;right:20px;bottom:20px;background:var(--card);padding:10px 14px;border-radius:10px;border:1px solid var(--border);color:var(--text);box-shadow:var(--shadow-sm)}
   .small-btn{padding:9px 12px;border-radius:10px;border:1px solid var(--border);background:transparent;color:#d9e2ea;cursor:pointer;margin-left:6px;transition:all .15s ease}
   .small-btn:hover{transform:translateY(-1px);border-color:rgba(255,255,255,0.18)}
+  .row-actions {
+    display:flex; gap:6px; align-items:center; white-space:nowrap;
+  }
+  .row-action {
+    border:1px solid var(--border);
+    background:transparent;
+    color:#cfd7e2;
+    padding:4px 6px;
+    border-radius:8px;
+    cursor:pointer;
+    line-height:1;
+    font-size:12px;
+    transition:all .15s ease;
+  }
+  .row-action:hover { transform: translateY(-1px); border-color: rgba(255,255,255,0.18); color:#fff; }
+  .row-action:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+  .row-action.danger { color:var(--danger); border-color: rgba(239,68,68,0.35); }
+
   .approve{background:var(--success);color:#06150b;border:0}
   .reject{background:var(--danger);color:white;border:0}
   .loading{display:flex;flex-direction:column;align-items:center;gap:8px;color:var(--muted);padding:24px}
@@ -72,6 +90,24 @@
   @keyframes spin{to{transform:rotate(360deg)}}
   .spinner{animation:spin 1s linear infinite}
   @media (max-width:600px){.grid{grid-template-columns:repeat(auto-fill,minmax(170px,1fr))}}
+  /* Действия над строкой в таблице */
+  .row-actions {
+    display:flex; gap:6px; align-items:center; white-space:nowrap;
+  }
+  .row-action {
+    border:1px solid var(--border);
+    background:transparent;
+    color:#cfd7e2;
+    padding:4px 6px;
+    border-radius:8px;
+    cursor:pointer;
+    line-height:1;
+    font-size:12px;
+    transition:all .15s ease;
+  }
+  .row-action:hover { transform: translateY(-1px); border-color: rgba(255,255,255,0.18); color:#fff; }
+  .row-action:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+  .row-action.danger { color:var(--danger); border-color: rgba(239,68,68,0.35); }
 
   /* Логи */
   .log-table td{white-space:pre-wrap;word-break:break-word}
@@ -256,6 +292,7 @@
 
   let cachedTable = null;
   let tableSettings = null;
+  let copiedRow = null; // буфер копирования строки
 
   let usersPage = 1;
   const PAGE_SIZE = 30;
@@ -628,26 +665,77 @@
   function renderTable(data){
     const wrap = document.getElementById('table-wrap');
     if (!data || data.length === 0) { wrap.innerHTML = '<div class="card">Данные не найдены</div>'; return; }
-    const table = document.createElement('table');
 
-    // Без отображения заголовка: показываем только редактируемые ячейки (tbody)
+    const table = document.createElement('table');
     const tbody = document.createElement('tbody');
-    for (let i=1;i<data.length;i++){
+
+    for (let i = 0; i < data.length; i++) {
       const tr = document.createElement('tr');
-      for (let j=0;j<data[i].length;j++){
-        const td = document.createElement('td'); td.textContent = data[i][j];
+
+      if (isAdmin) {
+        const ctrl = document.createElement('td');
+        const box = document.createElement('div');
+        box.className = 'row-actions';
+
+        const upBtn = document.createElement('button');
+        upBtn.className = 'row-action';
+        upBtn.title = 'Вверх';
+        upBtn.textContent = '▲';
+        upBtn.disabled = (i === 0);
+        upBtn.addEventListener('click', withCooldown(() => moveRowUp(i), 200));
+
+        const downBtn = document.createElement('button');
+        downBtn.className = 'row-action';
+        downBtn.title = 'Вниз';
+        downBtn.textContent = '▼';
+        downBtn.disabled = (i === data.length - 1);
+        downBtn.addEventListener('click', withCooldown(() => moveRowDown(i), 200));
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'row-action';
+        copyBtn.title = 'Скопировать строку в буфер';
+        copyBtn.textContent = '📋';
+        copyBtn.addEventListener('click', withCooldown(() => copyRow(i), 200));
+
+        const pasteBtn = document.createElement('button');
+        pasteBtn.className = 'row-action';
+        pasteBtn.title = 'Вставить из буфера в эту строку';
+        pasteBtn.textContent = '📥';
+        pasteBtn.disabled = !copiedRow;
+        pasteBtn.addEventListener('click', withCooldown(() => pasteRow(i), 200));
+
+        const clearBtn = document.createElement('button');
+        clearBtn.className = 'row-action danger';
+        clearBtn.title = 'Очистить строку';
+        clearBtn.textContent = 'Очистить';
+        clearBtn.addEventListener('click', withCooldown(() => {
+          if (confirm('Очистить все ячейки этой строки?')) clearRow(i);
+        }, 200));
+
+        box.appendChild(upBtn);
+        box.appendChild(downBtn);
+        box.appendChild(copyBtn);
+        box.appendChild(pasteBtn);
+        box.appendChild(clearBtn);
+        ctrl.appendChild(box);
+        tr.appendChild(ctrl);
+      }
+
+      for (let j = 0; j < data[i].length; j++) {
+        const td = document.createElement('td');
+        td.textContent = data[i][j];
 
         if (isAdmin) {
           td.contentEditable = true;
           td.className = 'editable';
-          (function(r,c,cell){
+          ((r, c, cell) => {
             cell.addEventListener('input', function(){
-              if (!cachedTable[r]) cachedTable[r]=[];
+              if (!cachedTable[r]) cachedTable[r] = [];
               cachedTable[r][c] = this.textContent;
               this.classList.add('changed');
               document.getElementById('save-table').style.display = 'inline-block';
             });
-          })(i,j,td);
+          })(i, j, td);
         } else {
           td.contentEditable = false;
           td.className = '';
@@ -655,16 +743,17 @@
 
         tr.appendChild(td);
       }
+
       tbody.appendChild(tr);
     }
+
     table.appendChild(tbody);
     wrap.innerHTML = '';
     wrap.appendChild(table);
 
-    // сохранение только для админов
     document.getElementById('save-table').style.display = isAdmin ? 'inline-block' : 'none';
     document.getElementById('save-table').onclick = withCooldown(saveTable);
-  }
+}
 
   function saveTable(){
     if (!cachedTable || !tableSettings) { showToast('Нет данных для сохранения',1500); return; }
@@ -692,6 +781,98 @@
     disableDuring(btn, p);
   }
 
+  function ensureSaveVisible() {
+  const btn = document.getElementById('save-table');
+  if (btn) btn.style.display = 'inline-block';
+}
+
+  function ensureSaveVisible() {
+    const btn = document.getElementById('save-table');
+    if (btn) btn.style.display = 'inline-block';
+  }
+
+  function moveRowUp(index){
+    if (!Array.isArray(cachedTable) || index <= 0 || index >= cachedTable.length) return;
+    const tmp = cachedTable[index - 1];
+    cachedTable[index - 1] = cachedTable[index];
+    cachedTable[index] = tmp;
+    renderTable(cachedTable);
+    ensureSaveVisible();
+  }
+
+  function moveRowDown(index){
+    if (!Array.isArray(cachedTable) || index < 0 || index >= cachedTable.length - 1) return;
+    const tmp = cachedTable[index + 1];
+    cachedTable[index + 1] = cachedTable[index];
+    cachedTable[index] = tmp;
+    renderTable(cachedTable);
+    ensureSaveVisible();
+  }
+
+  function clearRow(index){
+    if (!Array.isArray(cachedTable) || index < 0 || index >= cachedTable.length) return;
+    const cols = cachedTable[index]?.length || 0;
+    cachedTable[index] = Array.from({length: cols}, () => '');
+    renderTable(cachedTable);
+    ensureSaveVisible();
+  }
+
+  function copyRow(index) {
+    if (!Array.isArray(cachedTable) || index < 0 || index >= cachedTable.length) return;
+    copiedRow = [...cachedTable[index]];
+    showToast('Строка скопирована в буфер', 1200);
+    renderTable(cachedTable);
+  }
+
+  function pasteRow(index) {
+    if (!copiedRow || !Array.isArray(copiedRow)) {
+      showToast('Буфер пуст', 1500);
+      return;
+    }
+    if (!Array.isArray(cachedTable) || index < 0 || index >= cachedTable.length) return;
+    const cols = cachedTable[index]?.length || copiedRow.length;
+    cachedTable[index] = Array.from({length: cols}, (_, j) => copiedRow[j] ?? '');
+    renderTable(cachedTable);
+    ensureSaveVisible();
+  }
+
+
+function moveRowUp(index){
+  if (!Array.isArray(cachedTable) || index <= 0 || index >= cachedTable.length) return;
+  const tmp = cachedTable[index - 1];
+  cachedTable[index - 1] = cachedTable[index];
+  cachedTable[index] = tmp;
+  renderTable(cachedTable);
+  ensureSaveVisible();
+}
+
+function moveRowDown(index){
+  if (!Array.isArray(cachedTable) || index < 0 || index >= cachedTable.length - 1) return;
+  const tmp = cachedTable[index + 1];
+  cachedTable[index + 1] = cachedTable[index];
+  cachedTable[index] = tmp;
+  renderTable(cachedTable);
+  ensureSaveVisible();
+}
+
+function clearRow(index){
+  if (!Array.isArray(cachedTable) || index < 0 || index >= cachedTable.length) return;
+  const cols = cachedTable[index]?.length || 0;
+  cachedTable[index] = Array.from({length: cols}, () => '');
+  renderTable(cachedTable);
+  ensureSaveVisible();
+}
+
+function copyRowDown(index){
+  if (!Array.isArray(cachedTable) || index < 0 || index >= cachedTable.length - 1) return;
+  const src = cachedTable[index] || [];
+  const dstCols = cachedTable[index + 1]?.length || src.length;
+  const dup = Array.from({length: dstCols}, (_, j) => src[j] ?? '');
+  cachedTable[index + 1] = dup;
+  renderTable(cachedTable);
+  ensureSaveVisible();
+}
+
   // ----- Profile -----
   function loadProfile(){
     const card = document.getElementById('profile-card');
@@ -701,7 +882,7 @@
     google.script.run
       .withSuccessHandler(u=>{ if (!u) { card.innerHTML = '<div class="card">Профиль не найден</div>'; return; } renderProfile(u); loaded.profile = true; })
       .withFailureHandler(()=> { card.innerHTML = '<div class="card">Ошибка загрузки профиля</div>'; })
-      .getUserByEmail(email);
+      .getUserByEmailWithToken(sessionStorage.getItem('sessionToken') || '', email);
   }
 
   function renderProfile(u){
@@ -746,28 +927,84 @@
     google.script.run
       .withSuccessHandler(reqs=>{ loading.style.display = 'none'; renderRequests(reqs || []); loaded.requests = true; })
       .withFailureHandler(()=> { loading.style.display = 'none'; list.innerHTML = '<div class="card">Ошибка загрузки заявок</div>'; })
-      .getRegistrationRequests();
+      .getRegistrationRequestsWithToken(sessionStorage.getItem('sessionToken') || '');
   }
 
   function renderRequests(reqs){
     const list = document.getElementById('requests-list');
     list.innerHTML = '';
-    if (!reqs || reqs.length === 0) { list.innerHTML = '<div class="card">Заявок нет</div>'; return; }
+    if (!reqs || !reqs.requests || reqs.requests.length === 0) {
+      list.innerHTML = '<div class="card">Заявок нет</div>';
+      return;
+    }
     const frag = document.createDocumentFragment();
-    reqs.forEach(r=>{
-      const card = document.createElement('div'); card.className='card'; card.style.display='flex'; card.style.justifyContent='space-between'; card.style.alignItems='center';
+    reqs.requests.forEach(r=>{
+      const colorHex = normalizeColorClient(r.color || '#5865F2');
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.style.display='flex';
+      card.style.flexWrap='wrap';
+      card.style.gap='16px';
+      card.style.alignItems='center';
+      card.style.justifyContent='space-between';
+
+      // Левая часть
       const left = document.createElement('div');
-      const av = document.createElement('div'); av.textContent = r.emoji || '👤'; av.style.fontSize='22px';
-      const title = document.createElement('div'); title.className='name'; title.textContent = r.name || '(Без имени)';
-      const mail = document.createElement('div'); mail.className='desc'; mail.textContent = r.email || '';
-      left.appendChild(av); left.appendChild(title); left.appendChild(mail);
+      left.style.display = 'flex';
+      left.style.gap = '12px';
+      left.style.alignItems = 'center';
+      left.style.flex = '1';
+
+      const av = document.createElement('div');
+      av.textContent = r.emoji || '\uD83D\uDC64';
+      av.style.fontSize='30px';
+
+      const info = document.createElement('div');
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.style.color = colorHex;
+      name.textContent = r.name || '(Без имени)';
+
+      const roleWrap = document.createElement('div');
+      roleWrap.className = 'role';
+      const dot = document.createElement('span');
+      dot.className = 'role-dot';
+      dot.style.backgroundColor = colorHex;
+      const roleText = document.createElement('span');
+      roleText.textContent = r.role || '';
+      roleWrap.appendChild(dot);
+      roleWrap.appendChild(roleText);
+
+      const mail = document.createElement('div');
+      mail.className = 'desc';
+      mail.textContent = r.email || '';
+
+      // добавляем только имя, роль и почту — без описания
+      info.appendChild(name);
+      info.appendChild(roleWrap);
+      info.appendChild(mail);
+
+      left.appendChild(av);
+      left.appendChild(info);
+
+      // Правая часть (кнопки)
       const right = document.createElement('div');
-      const approve = document.createElement('button'); approve.className='small-btn approve'; approve.textContent='Принять';
-      const reject = document.createElement('button'); reject.className='small-btn reject'; reject.textContent='Отклонить';
+      right.style.display = 'flex';
+      right.style.gap = '8px';
+      const approve = document.createElement('button');
+      approve.className='small-btn approve';
+      approve.textContent='Принять';
+      const reject = document.createElement('button');
+      reject.className='small-btn reject';
+      reject.textContent='Отклонить';
       approve.addEventListener('click', function(){ handleApprove(r._row, approve, reject); });
       reject.addEventListener('click', function(){ handleReject(r._row, approve, reject); });
-      right.appendChild(approve); right.appendChild(reject);
-      card.appendChild(left); card.appendChild(right); frag.appendChild(card);
+      right.appendChild(approve);
+      right.appendChild(reject);
+
+      card.appendChild(left);
+      card.appendChild(right);
+      frag.appendChild(card);
     });
     list.appendChild(frag);
   }
