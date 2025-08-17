@@ -130,7 +130,7 @@
   <!-- Users -->
   <section id="section-users">
     <h2 class="section-title">Пользователи</h2>
-    <p class="section-desc">Список участников системы</p>
+    <p class="section-desc">Список участников системы — Всего: <span id="users-count">0</span></p>
 
     <div class="controls">
       <input id="search" type="text" placeholder="Поиск по имени..." />
@@ -494,6 +494,7 @@
       .withSuccessHandler(res=>{
         if (!res) { grid.innerHTML = '<div class="card">Ошибка загрузки</div>'; return; }
         usersTotal = res.total || usersTotal;
+        const countEl = document.getElementById('users-count'); if (countEl) countEl.textContent = String(usersTotal);
         if (page === 1) {
           allUsers = res.users || [];
         } else {
@@ -522,6 +523,7 @@
     const sel = document.getElementById('role-filter');
     sel.innerHTML = '<option value="">Все роли</option>';
     allRoles.forEach(r=>{ const opt = document.createElement('option'); opt.value = r; opt.textContent = r; sel.appendChild(opt); });
+    const cnt = document.getElementById('users-count'); if (cnt) cnt.textContent = String(usersTotal || users.length || 0);
   }
 
   function searchUsers(){
